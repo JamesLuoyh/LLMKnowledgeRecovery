@@ -1,0 +1,19 @@
+[project]
+name = "knowledge-recovery"
+version = "0.0.1"
+description = "Stage dispatcher and domain errors for clean-answer knowledge recovery."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+kr = "knowledge_recovery.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
