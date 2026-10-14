@@ -14,6 +14,8 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "transformers",
     "datasets",
     "knowledge_recovery.datasets",
+    "knowledge_recovery.records",
+    "knowledge_recovery.provenance",
     "knowledge_recovery.prompts",
     "knowledge_recovery.models",
     "knowledge_recovery.probes",

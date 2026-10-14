@@ -1,4 +1,4 @@
-"""Public domain errors for the knowledge-recovery package."""
+"""Public errors and content identities for the knowledge-recovery package."""
 
 from knowledge_recovery.errors import (
     AnswerInstructionMismatch,
@@ -11,9 +11,24 @@ from knowledge_recovery.errors import (
     TokenAuditRequired,
     UnsupportedPositionSelector,
 )
+from knowledge_recovery.provenance import (
+    Artifact,
+    canonical_json,
+    content_digest,
+    evaluation_id,
+    extraction_row_key,
+    extraction_signature,
+    identify,
+    model_signature,
+    prompt_contract,
+    prompt_signature,
+    run_id,
+    view_id,
+)
 
 __all__ = [
     "AnswerInstructionMismatch",
+    "Artifact",
     "CacheIncomplete",
     "CacheIncompatible",
     "CanonicalTokenNotSingle",
@@ -22,4 +37,15 @@ __all__ = [
     "MissingLocalAsset",
     "TokenAuditRequired",
     "UnsupportedPositionSelector",
+    "canonical_json",
+    "content_digest",
+    "evaluation_id",
+    "extraction_row_key",
+    "extraction_signature",
+    "identify",
+    "model_signature",
+    "prompt_contract",
+    "prompt_signature",
+    "run_id",
+    "view_id",
 ]
