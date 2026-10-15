@@ -1,7 +1,7 @@
 [project]
 name = "knowledge-recovery"
 version = "0.0.1"
-description = "Stage dispatcher and domain errors for clean-answer knowledge recovery."
+description = "Domain records, canonical hashes, and stage dispatch for clean-answer knowledge recovery."
 requires-python = ">=3.11"
 dependencies = []
 
