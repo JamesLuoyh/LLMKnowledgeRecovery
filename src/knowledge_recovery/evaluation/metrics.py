@@ -5,6 +5,10 @@ sum of both classes. ECE bins the probability of the predicted label on
 ``[0, 1]``; it does not bin the probability of the true label. An exact
 probability of zero on an observed label is an infinite cross-entropy with
 an explicit flag, so exports do not need nonstandard JSON numbers.
+
+``roc_auc`` is the ranking of the positive-class probability. It is not a
+field of ``BinaryMetrics`` and it is not written into the saved evaluation
+report.
 """
 
 from __future__ import annotations
@@ -111,6 +115,37 @@ def metrics_document(metrics: BinaryMetrics) -> dict[str, object]:
             for item in metrics.bins
         ],
     }
+
+
+def roc_auc(probabilities: Sequence[float], targets: Sequence[int]) -> float | None:
+    """ROC AUC of the positive-class probability.
+
+    Ties use the average rank: a tied pair contributes one half. ``None``
+    means the slice is empty or contains only one class, so the ranking is
+    undefined. A constant score on both classes is 0.5.
+    """
+    positive = _probabilities(probabilities)
+    observed = _targets(targets)
+    if len(positive) != len(observed):
+        raise ValueError("probabilities and targets must have the same length")
+    if not positive:
+        return None
+    higher = 0.0
+    positive_count = sum(label == 1 for label in observed)
+    negative_count = len(observed) - positive_count
+    if positive_count == 0 or negative_count == 0:
+        return None
+    for score, label in zip(positive, observed, strict=True):
+        if label != 1:
+            continue
+        for other, other_label in zip(positive, observed, strict=True):
+            if other_label != 0:
+                continue
+            if score > other:
+                higher += 1.0
+            elif score == other:
+                higher += 0.5
+    return higher / (positive_count * negative_count)
 
 
 def _binary_metrics(

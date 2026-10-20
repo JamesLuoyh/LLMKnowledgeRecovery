@@ -11,6 +11,10 @@ dependencies = [
 
 [project.optional-dependencies]
 model = ["torch>=2.11", "transformers>=5.20"]
+plots = [
+    "matplotlib>=3.9",
+    "wandb>=0.19",
+]
 
 [project.scripts]
 kr = "knowledge_recovery.cli:main"

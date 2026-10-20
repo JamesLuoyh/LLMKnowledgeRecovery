@@ -20,6 +20,7 @@ from knowledge_recovery.evaluation.metrics import (
     awareness_metrics,
     consistency_metrics,
     metrics_document,
+    roc_auc,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "metrics_document",
     "metrics_from_predictions",
     "recompute_exported_slice",
+    "roc_auc",
 ]
