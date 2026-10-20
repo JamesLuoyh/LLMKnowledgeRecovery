@@ -39,14 +39,17 @@ def subset_forward(
     precision: str,
 ) -> tuple[dict[str, numpy.ndarray], ...]:
     """Drive the named hooks, then place the labeled logits on the last real token."""
-    model.pending_logits = [labeled_logits(row["question"], row["order_id"]) for row in rows]
+    model.pending_logits = [
+        labeled_logits(row["question"], row["order_id"], row.get("variant_id", "clean"))
+        for row in rows
+    ]
     try:
         return forward_padded(model, rows, batch_size=batch_size, precision=precision)
     finally:
         model.pending_logits = None
 
 
-def labeled_logits(question: str, order_id: str) -> numpy.ndarray:
+def labeled_logits(question: str, order_id: str, variant_id: str = "clean") -> numpy.ndarray:
     """Fixed full-vocabulary logits for the two labeled questions.
 
     The failing order puts its mass on a token outside A and B. The others
@@ -58,6 +61,8 @@ def labeled_logits(question: str, order_id: str) -> numpy.ndarray:
         return logits
     preferred = TOKEN_A if order_id == "correct_at_A" else TOKEN_B
     other = TOKEN_B if preferred == TOKEN_A else TOKEN_A
+    if variant_id in ("T-IC", "NT-IC"):
+        preferred, other = other, preferred
     logits[preferred] = 5.0
     logits[other] = 0.0
     return logits

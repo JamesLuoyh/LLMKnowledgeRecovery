@@ -191,7 +191,6 @@ class PromptContract(Record):
     Audit timestamps and filesystem locations are not fields of this contract.
     """
 
-    template: str
     chat: bool
     system_message: str | None
     instruction: str
@@ -201,7 +200,6 @@ class PromptContract(Record):
     token_audit_content: Mapping[str, Any]
 
     def validate(self) -> None:
-        _text(self.template, "template")
         _text(self.instruction, "instruction")
         _text(self.prompt_boundary, "prompt_boundary")
         _text(self.renderer_version, "renderer_version")

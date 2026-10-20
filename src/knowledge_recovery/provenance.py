@@ -129,7 +129,6 @@ def model_signature(
 
 def prompt_contract(
     *,
-    template: str,
     chat: bool,
     system_message: str | None,
     instruction: str,
@@ -140,7 +139,6 @@ def prompt_contract(
 ) -> Artifact:
     """Identity of the chat contract. Timestamps and paths are not arguments."""
     return identify(PromptContract(
-        template=template,
         chat=chat,
         system_message=system_message,
         instruction=instruction,

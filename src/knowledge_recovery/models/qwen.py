@@ -318,11 +318,12 @@ def load_qwen(path: Path | str, *, precision: str) -> Any:
 class QwenAdapter:
     """Torch module exposed under the documented hook names."""
 
-    def __init__(self, inner: Any, *, precision: str) -> None:
+    def __init__(self, inner: Any, *, precision: str, device: str) -> None:
         self.inner = inner
         self.model = inner.model
         self.lm_head = inner.lm_head
         self.execution_precision = precision
+        self.device = device
         self.training = False
 
     def eval(self) -> QwenAdapter:
@@ -336,8 +337,8 @@ class QwenAdapter:
     def forward(self, input_ids: Any, attention_mask: Any):
         import torch
 
-        ids = torch.tensor(numpy.asarray(input_ids), dtype=torch.long)
-        mask = torch.tensor(numpy.asarray(attention_mask), dtype=torch.long)
+        ids = torch.tensor(numpy.asarray(input_ids), dtype=torch.long, device=self.device)
+        mask = torch.tensor(numpy.asarray(attention_mask), dtype=torch.long, device=self.device)
         with torch.no_grad():
             result = self.inner(input_ids=ids, attention_mask=mask, use_cache=False)
         return result.logits
@@ -404,6 +405,40 @@ class QwenContinuationTokenizer:
         return self.tokenizer.decode([token_id]).encode("utf-8")
 
 
+def numeric_runtime_signature(model_config: Mapping[str, Any], *, precision: str) -> dict[str, Any]:
+    """Resolve the backend facts that make cached numerical output compatible."""
+    if model_config.get("model_type") == "integration_mock":
+        return {
+            "backend": "integration_mock",
+            "numpy_version": numpy.__version__,
+            "device_type": "cpu",
+            "device_capability": None,
+            "attention_backend": "mock_eager",
+            "execution_precision": precision,
+        }
+    try:
+        import torch
+        import transformers
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing component: torch and transformers are required to resolve the Qwen runtime."
+        ) from exc
+    cuda = bool(torch.cuda.is_available())
+    capability = list(torch.cuda.get_device_capability()) if cuda else None
+    device_name = torch.cuda.get_device_name(0) if cuda else "cpu"
+    return {
+        "backend": "torch",
+        "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
+        "numpy_version": numpy.__version__,
+        "device_type": "cuda" if cuda else "cpu",
+        "device_name": device_name,
+        "device_capability": capability,
+        "attention_backend": "eager",
+        "execution_precision": precision,
+    }
+
+
 def _load_qwen_weights(path: Path, *, precision: str, config: dict[str, Any]) -> QwenAdapter:
     activate_offline()
     try:
@@ -418,11 +453,18 @@ def _load_qwen_weights(path: Path, *, precision: str, config: dict[str, Any]) ->
     resolve_execution_precision(precision, bf16_supported=bf16, fp16_supported=fp16)
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
     del config
-    inner = AutoModelForCausalLM.from_pretrained(path, local_files_only=True, torch_dtype=dtype)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    inner = AutoModelForCausalLM.from_pretrained(
+        path,
+        local_files_only=True,
+        torch_dtype=dtype,
+        attn_implementation="eager",
+    )
+    inner.to(device)
     inner.eval()
     for parameter in inner.parameters():
         parameter.requires_grad_(False)
-    return QwenAdapter(inner, precision=precision)
+    return QwenAdapter(inner, precision=precision, device=str(device))
 
 
 def _drop_hook(handle: Any) -> None:

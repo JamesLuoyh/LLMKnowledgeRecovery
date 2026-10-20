@@ -68,7 +68,6 @@ def _audit(tokenizer, examples, **overrides) -> TokenAudit:
         canonical_strings=("A", "B"),
         model_content_digest=DIGEST_A,
         tokenizer_content_digest=DIGEST_B,
-        template_name="native_pinned",
         chat=False,
         system_message=None,
         instruction=INSTRUCTION,

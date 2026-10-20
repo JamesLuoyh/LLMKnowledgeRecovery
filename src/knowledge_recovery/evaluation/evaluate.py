@@ -57,6 +57,7 @@ class EvaluationRow:
     consistency_target: int
     residuals: Mapping[int, tuple[float, ...]]
     canonical_ab: tuple[float, float]
+    instance_id: str = ""
     weight: float = 1.0
 
     def __post_init__(self) -> None:
@@ -187,6 +188,8 @@ def _probe(manifest: SelectionManifest) -> LinearProbe:
 
 
 def _linear_predictions(rows: Sequence[EvaluationRow], probe: LinearProbe) -> list[dict[str, Any]]:
+    if not rows:
+        return []
     if any(probe.layer not in row.residuals for row in rows):
         raise ValueError(f"every row must contain residual features for selected layer {probe.layer}")
     design = numpy.asarray([row.residuals[probe.layer] for row in rows], dtype=numpy.float64)
@@ -263,6 +266,7 @@ def _prediction(
         "base_group_id": row.base_group_id,
         "order_id": row.order_id,
         "variant_id": row.variant_id,
+        "instance_id": row.instance_id,
         "domain": row.domain,
         "position": row.position,
         "task_id": task_id,
@@ -421,8 +425,8 @@ def _finite_logit(probability: float) -> float | None:
 
 
 def _rows(rows: Sequence[EvaluationRow]) -> tuple[EvaluationRow, ...]:
-    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence) or not rows:
-        raise ValueError("at least one evaluation row is required")
+    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
+        raise TypeError("rows must be a sequence of EvaluationRow records")
     if any(type(row) is not EvaluationRow for row in rows):
         raise TypeError("rows must be EvaluationRow records")
     return tuple(rows)
