@@ -1,5 +1,11 @@
-"""Point metrics and paired behavioral counts."""
+"""Point metrics, paired behavioral counts, and saved-prediction evaluation."""
 
+from knowledge_recovery.evaluation.evaluate import (
+    EvaluationRow,
+    evaluate_saved,
+    metrics_from_predictions,
+    recompute_exported_slice,
+)
 from knowledge_recovery.evaluation.behavior import (
     BehaviorRow,
     BehaviorTable,
@@ -21,11 +27,15 @@ __all__ = [
     "DEFAULT_ECE_BINS",
     "BinaryMetrics",
     "CalibrationBin",
+    "EvaluationRow",
     "BehaviorRow",
     "BehaviorTable",
     "awareness_metrics",
     "behavior_document",
     "behavior_tables",
     "consistency_metrics",
+    "evaluate_saved",
     "metrics_document",
+    "metrics_from_predictions",
+    "recompute_exported_slice",
 ]
