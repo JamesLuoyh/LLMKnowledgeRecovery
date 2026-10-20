@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 import numpy
+from tqdm import tqdm
 
 from knowledge_recovery.cache.store import ExtractionStore, RowReference
 from knowledge_recovery.errors import CacheIncomplete, CacheIncompatible, KnowledgeRecoveryError
@@ -85,7 +86,8 @@ def run_extraction(
         )
     model = model_factory()
     freeze_model(model)
-    pending = [row for row in rows if row["row_key"] in set(missing)]
+    absent = set(missing)
+    pending = [row for row in rows if row["row_key"] in absent]
     batch_sizes = _compute_missing(
         pending,
         store=store,
@@ -136,23 +138,26 @@ def _compute_missing(
 ) -> tuple[int, ...]:
     sizes: list[int] = []
     size = batch_size
-    while pending:
-        chunk = pending[:size]
-        try:
-            produced = forward_batch(model, chunk, batch_size=size, precision=precision)
-        except BatchExceededMemory:
-            if size == 1:
-                raise
-            size = max(1, size // 2)
-            continue
-        if len(tuple(produced)) != len(chunk):
-            raise RuntimeError("the forward pass did not return one row per prompt")
-        store_rows = []
-        for row, item in zip(chunk, produced, strict=True):
-            store_rows.append(_store_row(str(row["row_key"]), item, precision, size, execution_backend))
-        store.write_rows(store_rows)
-        sizes.append(size)
-        pending = pending[len(chunk):]
+    with tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress:
+        while pending:
+            chunk = pending[:size]
+            try:
+                produced = forward_batch(model, chunk, batch_size=size, precision=precision)
+            except BatchExceededMemory:
+                if size == 1:
+                    raise
+                size = max(1, size // 2)
+                continue
+            if len(tuple(produced)) != len(chunk):
+                raise RuntimeError("the forward pass did not return one row per prompt")
+            store_rows = []
+            for row, item in zip(chunk, produced, strict=True):
+                store_rows.append(_store_row(str(row["row_key"]), item, precision, size, execution_backend))
+            store.write_rows(store_rows)
+            sizes.append(size)
+            pending = pending[len(chunk):]
+            progress.update(len(chunk))
+            progress.set_postfix(batch=size)
     return tuple(sizes)
 
 
@@ -188,8 +193,9 @@ def _store_row(
 def _missing_keys(store: ExtractionStore, keys: Sequence[str]) -> tuple[str, ...]:
     missing = []
     saw_unindexed = False
+    statuses = store.row_statuses(keys)
     for key in keys:
-        status = store.row_status(key)
+        status = statuses[key]
         if status == "indexed":
             continue
         if status == "incomplete":
@@ -216,8 +222,9 @@ def _missing_keys(store: ExtractionStore, keys: Sequence[str]) -> tuple[str, ...
 
 def _require_cached(store: ExtractionStore, keys: Sequence[str]) -> None:
     missing = []
+    statuses = store.row_statuses(keys)
     for key in keys:
-        status = store.row_status(key)
+        status = statuses[key]
         if status == "indexed":
             continue
         if status == "incomplete":

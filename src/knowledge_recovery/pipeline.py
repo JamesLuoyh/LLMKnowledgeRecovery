@@ -67,7 +67,7 @@ from knowledge_recovery.training.fit import TRAINING_IMPLEMENTATION_VERSION, fit
 from knowledge_recovery.training.manifest import write_selection_manifest
 from knowledge_recovery.training.select import select_probe
 from knowledge_recovery.views.build import ScoredRow, build_task_views
-from knowledge_recovery.views.filters import CleanOrder, apply_filter_gate
+from knowledge_recovery.views.filters import CleanOrder, apply_filter_gate, apply_variant_gate
 from knowledge_recovery.views.splits import freeze_grouped_split
 
 STAGE_ORDER = (
@@ -197,8 +197,8 @@ def prepare_stage(request: StageRequest) -> None:
         "raw_source_rows": normalized.raw_source_rows,
         "recovered_base_items": normalized.recovered_base_items,
         "duplicate_rows": normalized.duplicate_rows,
-        "invalid_rows": [_plain(item) for item in normalized.invalid_rows],
-        "exclusions": [_plain(item) for item in normalized.exclusions],
+        "invalid_rows": [_plain(item.payload()) for item in normalized.invalid_rows],
+        "exclusions": [_plain(item.payload()) for item in normalized.exclusions],
         "template_counts": normalized.template_counts(),
         "items": [_plain(item.payload()) for item in normalized.items],
     })
@@ -251,7 +251,8 @@ def extract_stage(request: StageRequest) -> None:
         )
         prepared.append({**row, "row_key": row_key})
     store = ExtractionStore(storage)
-    missing = [row["row_key"] for row in prepared if store.row_status(row["row_key"]) != "indexed"]
+    statuses = store.row_statuses([row["row_key"] for row in prepared])
+    missing = [row["row_key"] for row in prepared if statuses[row["row_key"]] != "indexed"]
 
     def factory() -> object:
         return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
@@ -327,8 +328,14 @@ def diagnose_stage(request: StageRequest) -> None:
     storage = _storage(config)
     activate_offline(storage / "assets" / "huggingface")
     collection = json.loads((storage / "extractions" / "collection.json").read_text(encoding="utf-8"))
+    # The collection's split copy can be stale after a re-split, so splits/split.json decides.
+    _, group_splits = _load_split(storage)
+    rows = [
+        {**row, "split": _split_of(group_splits, row["base_group_id"])}
+        for row in collection["rows"]
+    ]
     store = ExtractionStore(storage)
-    keys = [row["row_key"] for row in collection["rows"]]
+    keys = [row["row_key"] for row in rows]
     references = {
         item.extraction_row_key: item
         for item in store.lookup(keys, model_factory=_refuse_model, extraction_command="kr extract --config cache")
@@ -338,7 +345,7 @@ def diagnose_stage(request: StageRequest) -> None:
         B=int(collection["canonical_token_ids"]["B"]),
     )
     scored = []
-    for row in collection["rows"]:
+    for row in rows:
         logits = store.read_logits_row(references[row["row_key"]])
         scores = score_binary_answers([float(value) for value in logits.tolist()], tokens)
         raw_label = None
@@ -366,6 +373,42 @@ def diagnose_stage(request: StageRequest) -> None:
         min_correct_prob=config.analysis_view.min_correct_prob,
         variant_id=config.analysis_view.filter_variant,
     )
+    eligible = outcome.eligible_base_group_ids
+    variant_digest = None
+    variant_directory = storage / "analyses" / "filter"
+    if config.analysis_view.variant_stats:
+        intervened = [
+            variant_id
+            for variant_id in dict.fromkeys(row["variant_id"] for row in scored)
+            if variant_id != config.analysis_view.filter_variant
+        ]
+        variant_outcome = apply_variant_gate(
+            {
+                variant_id: [
+                    CleanOrder(
+                        base_group_id=row["base_group_id"],
+                        split=row["split"],
+                        order_id=row["order_id"],
+                        raw_ab_probabilities=row["scores"].raw_ab_probabilities,
+                        canonical_ab_probabilities=row["scores"].canonical_ab_probabilities,
+                        canonical_label_mass=row["scores"].canonical_label_mass,
+                        invalid_label=row["scores"].invalid_label,
+                    )
+                    for row in scored
+                    if row["variant_id"] == variant_id
+                ]
+                for variant_id in intervened
+            },
+            eligible,
+            output_directory=variant_directory,
+            min_correct_prob=config.analysis_view.min_correct_prob,
+            require_all=config.analysis_view.require_all_variants,
+        )
+        variant_digest = variant_outcome.report_digest
+        eligible = variant_outcome.eligible_base_group_ids
+    else:
+        for suffix in ("json", "txt"):
+            (variant_directory / f"variant_filter_report.{suffix}").unlink(missing_ok=True)
     clean_labels = {
         (row["base_group_id"], row["order_id"]): row["scores"].canonical_greedy_label
         for row in scored
@@ -387,8 +430,8 @@ def diagnose_stage(request: StageRequest) -> None:
     ]
     tables = behavior_tables(
         behavior_rows,
-        raw_retained=outcome.eligible_base_group_ids,
-        canonical_retained=outcome.eligible_base_group_ids,
+        raw_retained=eligible,
+        canonical_retained=eligible,
         clean_variant="clean",
     )
     _write_json(storage / "analyses" / "behavior.json", {
@@ -398,7 +441,9 @@ def diagnose_stage(request: StageRequest) -> None:
     })
     _write_json(storage / "analyses" / "scored.json", {
         "filter_digest": outcome.report_digest,
-        "eligible_base_group_ids": list(outcome.eligible_base_group_ids),
+        "variant_filter_digest": variant_digest,
+        "require_all_variants": config.analysis_view.require_all_variants,
+        "eligible_base_group_ids": list(eligible),
         "rows": [
             {
                 "row_key": row["row_key"],
@@ -425,8 +470,11 @@ def build_view_stage(request: StageRequest) -> None:
     config = _config(request)
     storage = _storage(config)
     scored = json.loads((storage / "analyses" / "scored.json").read_text(encoding="utf-8"))
-    split = json.loads((storage / "splits" / "split.json").read_text(encoding="utf-8"))
-    rows = [ScoredRow(**row) for row in scored["rows"]]
+    split, group_splits = _load_split(storage)
+    rows = [
+        ScoredRow(**{**row, "split": _split_of(group_splits, row["base_group_id"])})
+        for row in scored["rows"]
+    ]
     views = build_task_views(
         rows,
         eligible=scored["eligible_base_group_ids"],
@@ -942,6 +990,8 @@ def _reporting(config: ExperimentConfig) -> dict[str, Any]:
         },
         "training_seed": config.probe_run.training_seed,
         "filter_threshold": config.analysis_view.min_correct_prob,
+        "variant_stats": config.analysis_view.variant_stats,
+        "require_all_variants": config.analysis_view.require_all_variants,
         "loss": config.probe_run.loss,
         "ece_bins": config.probe_run.ece_bins,
         "ood_variants": list(config.analysis_view.eval_variants),
@@ -963,6 +1013,25 @@ def _established_audit(storage: Path):
         return None
     body = json.loads(pointer.read_text(encoding="utf-8"))
     return read_token_audit(storage / "audits" / body["path"])
+
+
+def _load_split(storage: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read the frozen split sidecar and its base-group assignment."""
+    path = storage / "splits" / "split.json"
+    if not path.is_file():
+        raise KnowledgeRecoveryError(f"split manifest does not exist: {path}\nRun kr prepare --config <path> first.")
+    split = json.loads(path.read_text(encoding="utf-8"))
+    return split, dict(split["record"]["group_to_split"])
+
+
+def _split_of(group_splits: Mapping[str, str], base_group_id: str) -> str:
+    try:
+        return group_splits[base_group_id]
+    except KeyError:
+        raise KnowledgeRecoveryError(
+            f"base group {base_group_id} is not in splits/split.json.\n"
+            "The split and the cached rows come from different prepared items. Rerun kr prepare."
+        ) from None
 
 
 def _config(request: StageRequest) -> ExperimentConfig:

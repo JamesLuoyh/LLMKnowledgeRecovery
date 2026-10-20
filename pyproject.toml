@@ -6,7 +6,11 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.6",
     "pyyaml>=6.0.3",
+    "tqdm>=4.70",
 ]
+
+[project.optional-dependencies]
+model = ["torch>=2.11", "transformers>=5.20"]
 
 [project.scripts]
 kr = "knowledge_recovery.cli:main"
@@ -17,6 +21,14 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = ["pytest>=8.3"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

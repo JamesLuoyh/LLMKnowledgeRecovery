@@ -164,5 +164,18 @@ def test_probe_only_lookup_reports_each_missing_key_without_inference(tmp_path):
         store.lookup([present], model_factory=factory, extraction_command=COMMAND, required_layers=(1, 9))
 
 
+def test_a_write_verifies_only_its_own_shard(tmp_path, monkeypatch):
+    from knowledge_recovery.cache import store as store_module
+
+    store = ExtractionStore(tmp_path)
+    for label in range(5):
+        store.write_rows([_row(_published_key(f"earlier-{label}"))])
+    verified = []
+    original = store_module._sealed_manifest
+    monkeypatch.setattr(store_module, "_sealed_manifest", lambda path: verified.append(path.name) or original(path))
+    references = store.write_rows([_row(_published_key("newest"))])
+    assert set(verified) == {references[0].shard_id}
+
+
 def _published_key(label: str) -> str:
     return content_digest({"kind": "test_row", "label": label})

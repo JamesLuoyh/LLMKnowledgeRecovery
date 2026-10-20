@@ -78,7 +78,7 @@ class ExtractionStore:
         """Write tensor bytes and a manifest. The shard stays incomplete."""
         parsed = _rows(rows)
         keys = tuple(item["row_key"] for item in parsed)
-        if any(self.row_status(key) != "absent" for key in keys):
+        if any(status != "absent" for status in self.row_statuses(keys).values()):
             raise ValueError("a row key that is already stored is not staged again")
         shard_id = checksum_bytes("\n".join(keys).encode())
         directory = self.staging_root / shard_id
@@ -115,24 +115,30 @@ class ExtractionStore:
         with self._exclusive_lock():
             self._commit_index_unlocked()
 
-    def _commit_index_unlocked(self) -> None:
+    def _commit_index_unlocked(self, shard_ids: Sequence[str] | None = None) -> None:
+        """Index sealed shards. Shards already named by the index are not re-read."""
         index = _read_index(self.index_path)
-        for directory in sorted(self.shard_root.iterdir()):
+        if shard_ids is None:
+            indexed = {entry["shard_id"] for entry in index["rows"].values()}
+            shard_ids = sorted(path.name for path in self.shard_root.iterdir() if path.name not in indexed)
+        for shard_id in shard_ids:
+            directory = self.shard_root / shard_id
             if not (directory / COMPLETE_NAME).is_file():
                 continue
             manifest = _sealed_manifest(directory)
             for offset, key in enumerate(manifest["row_keys"]):
-                index["rows"][key] = {"shard_id": directory.name, "row_offset": offset}
+                index["rows"][key] = {"shard_id": shard_id, "row_offset": offset}
         _atomic_bytes(self.index_path, _dumps(index).encode())
 
     def write_rows(self, rows: Sequence[Mapping[str, Any]]) -> tuple[RowReference, ...]:
         """Stage, seal, and index rows that are not already published."""
         with self._exclusive_lock():
-            pending = [row for row in rows if self.row_status(str(row["row_key"])) == "absent"]
+            statuses = self.row_statuses([str(row["row_key"]) for row in rows])
+            pending = [row for row in rows if statuses[str(row["row_key"])] == "absent"]
             if pending:
                 staged = self.stage_rows(pending)
                 self.complete_shard(staged)
-                self._commit_index_unlocked()
+                self._commit_index_unlocked([staged.shard_id])
         return self.lookup(
             [str(row["row_key"]) for row in rows],
             model_factory=_forbidden_model,
@@ -163,26 +169,40 @@ class ExtractionStore:
 
     def row_status(self, row_key: str) -> str:
         """Distinguish a missing key from an unfinished or unpublished shard."""
-        _key(row_key)
+        return self.row_statuses([row_key])[row_key]
+
+    def row_statuses(self, row_keys: Sequence[str]) -> dict[str, str]:
+        """``row_status`` for many keys, verifying each referenced shard once."""
+        keys = [_key(item) for item in row_keys]
         index = _read_index(self.index_path)
-        if row_key in index["rows"]:
-            entry = index["rows"][row_key]
-            try:
-                _sealed_manifest(self.shard_root / entry["shard_id"])
-            except CacheIncompatible:
-                return "incompatible"
-            return "indexed"
-        for directory in self.shard_root.iterdir():
-            manifest_path = directory / "manifest.json"
-            if not manifest_path.is_file():
+        statuses: dict[str, str] = {}
+        verified: dict[str, bool] = {}
+        unindexed = []
+        for key in keys:
+            if key not in index["rows"]:
+                unindexed.append(key)
                 continue
-            listed = json.loads(manifest_path.read_bytes()).get("row_keys", [])
-            if row_key not in listed:
-                continue
-            if (directory / COMPLETE_NAME).is_file():
-                return "complete_unindexed"
-            return "incomplete"
-        return "absent"
+            shard_id = index["rows"][key]["shard_id"]
+            if shard_id not in verified:
+                try:
+                    _sealed_manifest(self.shard_root / shard_id)
+                    verified[shard_id] = True
+                except CacheIncompatible:
+                    verified[shard_id] = False
+            statuses[key] = "indexed" if verified[shard_id] else "incompatible"
+        if unindexed:
+            indexed_shards = {entry["shard_id"] for entry in index["rows"].values()}
+            found: dict[str, str] = {}
+            for directory in self.shard_root.iterdir():
+                manifest_path = directory / "manifest.json"
+                if directory.name in indexed_shards or not manifest_path.is_file():
+                    continue
+                state = "complete_unindexed" if (directory / COMPLETE_NAME).is_file() else "incomplete"
+                for key in json.loads(manifest_path.read_bytes()).get("row_keys", []):
+                    found.setdefault(key, state)
+            for key in unindexed:
+                statuses[key] = found.get(key, "absent")
+        return statuses
 
     def lookup(
         self,
@@ -200,10 +220,13 @@ class ExtractionStore:
         if missing:
             raise CacheIncomplete(extraction_command=extraction_command, missing_keys=missing)
         references = []
+        manifests: dict[str, dict[str, Any]] = {}
         for key in keys:
             entry = index["rows"][key]
             directory = self.shard_root / entry["shard_id"]
-            manifest = _sealed_manifest(directory)
+            if entry["shard_id"] not in manifests:
+                manifests[entry["shard_id"]] = _sealed_manifest(directory)
+            manifest = manifests[entry["shard_id"]]
             offset = entry["row_offset"]
             if manifest["row_keys"][offset] != key:
                 raise CacheIncompatible(mismatches=("identity",), detail=f"index offset for {key} names another row")
