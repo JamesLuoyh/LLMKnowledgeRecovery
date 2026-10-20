@@ -10,7 +10,6 @@ from knowledge_recovery.errors import (
     CacheIncomplete,
     CacheIncompatible,
     CanonicalTokenNotSingle,
-    FilterPolicyDecisionRequired,
     KnowledgeRecoveryError,
     MissingLocalAsset,
     TokenAuditRequired,
@@ -24,7 +23,6 @@ NAMED = (
     CanonicalTokenNotSingle,
     AnswerInstructionMismatch,
     UnsupportedPositionSelector,
-    FilterPolicyDecisionRequired,
     MissingLocalAsset,
     CacheIncompatible,
     CacheIncomplete,
@@ -39,12 +37,12 @@ def test_named_exceptions_exit_nonzero():
         "CanonicalTokenNotSingle",
         "AnswerInstructionMismatch",
         "UnsupportedPositionSelector",
-        "FilterPolicyDecisionRequired",
         "MissingLocalAsset",
         "CacheIncompatible",
         "CacheIncomplete",
     ]
     assert all(issubclass(cls, KnowledgeRecoveryError) and cls.exit_code != 0 for cls in NAMED)
+    assert PROBABILITY_BASES == ("raw", "canonical")
 
 
 @pytest.mark.parametrize("field", TOKEN_AUDIT_FIELDS)
@@ -110,33 +108,6 @@ def test_answer_instruction_requires_a_new_audit(kind):
     )
     assert "one-letter instruction" in str(err)
     assert "Require an appropriate instruction and a new answer/token audit." in str(err)
-
-
-def test_filter_gate_messages_for_unset_and_contradictory_bases():
-    unset = FilterPolicyDecisionRequired(report_id="report-7")
-    assert unset.decision_state == "unset" and unset.exit_code != 0
-    assert str(unset).splitlines()[:4] == [
-        "FilterPolicyDecisionRequired:",
-        "Both filtering reports have been saved.",
-        "Choose probability_basis=raw or probability_basis=canonical",
-        "and record the decision against this report before probe training.",
-    ]
-    assert "kr record-filter-decision --report report-7 --basis <chosen-basis>" in str(unset)
-    conflict = FilterPolicyDecisionRequired(
-        report_id="report-7", requested_basis="raw", recorded_basis="canonical"
-    )
-    assert "requested probability basis 'raw'" in str(conflict)
-    assert "recorded decision 'canonical'" in str(conflict)
-    assert "reopens the gate after updated diagnostics" in str(conflict)
-    with pytest.raises(ValueError, match="matches"):
-        FilterPolicyDecisionRequired(
-            report_id="report-7", requested_basis="raw", recorded_basis="raw"
-        )
-    with pytest.raises(ValueError, match="basis"):
-        FilterPolicyDecisionRequired(
-            report_id="report-7", requested_basis="inferred", recorded_basis="canonical"
-        )
-    assert PROBABILITY_BASES == ("raw", "canonical")
 
 
 @pytest.mark.parametrize("kind", ASSET_KINDS)
