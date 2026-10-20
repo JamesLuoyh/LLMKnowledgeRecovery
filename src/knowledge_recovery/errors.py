@@ -127,50 +127,6 @@ class UnsupportedPositionSelector(KnowledgeRecoveryError):
         )
 
 
-class FilterPolicyDecisionRequired(KnowledgeRecoveryError):
-    """Reports are complete, but the explicit raw/canonical choice is not usable."""
-
-    def __init__(
-        self,
-        *,
-        report_id: str,
-        requested_basis: str | None = None,
-        recorded_basis: str | None = None,
-    ) -> None:
-        self.report_id = _token(report_id, "report_id")
-        if requested_basis is None and recorded_basis is None:
-            self.decision_state = "unset"
-            self.requested_basis = None
-            self.recorded_basis = None
-            message = (
-                "FilterPolicyDecisionRequired:\n"
-                "Both filtering reports have been saved.\n"
-                "Choose probability_basis=raw or probability_basis=canonical\n"
-                "and record the decision against this report before probe training.\n"
-                f"Report: {self.report_id}\n"
-                "Record command: kr record-filter-decision "
-                f"--report {self.report_id} --basis <chosen-basis>"
-            )
-        elif requested_basis is None or recorded_basis is None:
-            raise ValueError("a contradiction requires both the requested and recorded basis")
-        else:
-            self.requested_basis = _one(requested_basis, PROBABILITY_BASES, "basis")
-            self.recorded_basis = _one(recorded_basis, PROBABILITY_BASES, "basis")
-            if self.requested_basis == self.recorded_basis:
-                raise ValueError("requested basis matches the recorded decision")
-            self.decision_state = "contradiction"
-            message = (
-                "FilterPolicyDecisionRequired:\n"
-                "Both filtering reports are complete, but the requested "
-                f"probability basis {self.requested_basis!r} contradicts the "
-                f"recorded decision {self.recorded_basis!r}.\n"
-                f"Report: {self.report_id}\n"
-                "Requesting a contradictory basis reopens the gate after "
-                "updated diagnostics."
-            )
-        super().__init__(message)
-
-
 class MissingLocalAsset(KnowledgeRecoveryError):
     """A pinned model, tokenizer, or dataset artifact is absent offline."""
 

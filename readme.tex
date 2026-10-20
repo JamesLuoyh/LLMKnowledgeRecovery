@@ -119,7 +119,7 @@ If a future collection has multiple contexts per question, specify weighting and
 Reports compare both orders of the same instance, never an arbitrary combination of different passages.
 Context can legitimately change what answer is appropriate; these tasks measure recovery of the clean reference, so a changed answer is not automatically an error or sycophancy.
 
-\subsection*{Answer probabilities and the mandatory first-run stop}
+\subsection*{Answer probabilities and the fixed filter}
 
 The pipeline will preserve two kinds of answer probability:
 \begin{align*}
@@ -131,33 +131,26 @@ Canonical probabilities describe preference conditional on the answer being A or
 A high canonical probability can coexist with low probability of emitting either canonical token.
 Reports will therefore also contain canonical-label mass and unrestricted greedy-token validity.
 
-For each candidate filter, a base question passes only if the clean correct-answer probability is at least 0.8 in \emph{both} option orders.
-The diagnostic stage will report retained and removed counts under the raw and canonical filters, separately for train, validation, and test, then deliberately stop with:
-\begin{verbatim}
-FilterPolicyDecisionRequired:
-Both filtering reports have been saved.
-Choose probability_basis=raw or probability_basis=canonical
-and record the decision against this report before probe training.
-\end{verbatim}
-No policy will be selected automatically.
-The complete extraction cache will remain available after this error.
-Once the user chooses a policy, analysis and training can resume from cache without reloading the language model.
-That choice persists for compatible later runs; new seeds or split ratios produce updated diagnostics without asking the user to select the same policy again.
-The implementation must not interpret an unset policy as canonical normalization or select whichever filter retains more examples.
-The filter choice determines which questions are retained; both primary probe targets remain canonical A/B targets under either filter.
+Clean eligibility uses one fixed sequence.
+The unrestricted greedy token must be A or B.
+That option's canonical probability must be greater than 0.8.
+That option must be the correct label.
+Both option orders must pass.
+The diagnostic stage reports the count before these steps and after each step, for both orders together and for each correct-answer position, on the whole input and on each split.
+It does not stop to choose a raw or canonical basis.
+Both primary probe targets remain canonical A/B targets.
 
-\subsection*{Reports to inspect before choosing a policy}
+\subsection*{Reports}
 
-The first diagnostic report will contain:
+The diagnostic report will contain:
 \begin{enumerate}
 \item Source-row, duplicate, invalid-item, and valid-base-question counts, kept separate from model-correctness filtering.
-\item Raw and canonical threshold retention/removal counts and percentages, including failures in each order and their overlap.
-\item Clean accuracy when the correct answer is A, when it is B, and when both orders must be correct.
+\item Sample counts before the fixed filter and after each of its four steps, for both orders, correct-at-A, and correct-at-B.
 \item For each variant, changed-answer counts by correct-answer position among base questions clean-correct in both orders.
 \item For each variant, the number of those base questions whose answers change in both orders.
-\item Canonical-label mass and invalid canonical greedy outputs, especially among canonical-only retained questions.
+\item Canonical-label mass and unrestricted greedy tokens that fall outside A/B.
 \end{enumerate}
-Behavioral counts will be produced for the unfiltered valid population and each candidate filtered population, with distinct raw-token and canonical-label tables.
+Behavioral counts will be produced for the unfiltered valid population and the population that passes the fixed filter, with distinct raw-token and canonical-label tables.
 Every row will state its split, population, scoring convention, denominator, and whether the unit is a base question or an expanded prompt row.
 Zero denominators will be marked unavailable.
 All paired orders and variants stay in one base-question split.
@@ -172,16 +165,12 @@ kr audit-tokens --config configs/initial_sycophancy.yaml
 # Validate and save the contract; initial valid Qwen chat needs no approval.
 kr extract --config configs/initial_sycophancy.yaml
 kr diagnose --config configs/initial_sycophancy.yaml
-# Expected nonzero exit: filtering policy requires a user decision.
-
-# After receiving the user's actual policy choice:
-kr record-filter-decision --report <report-id> --basis <chosen-basis>
 kr build-view --config configs/initial_sycophancy.yaml
 kr train --config configs/initial_sycophancy.yaml
 kr evaluate --run <run-id>
 kr report --run <run-id>
 \end{verbatim}
-The token audit and filtering decision are different gates: the first checks which tokens represent the intended answers, and the second selects the analysis population.
+The token audit checks which tokens represent the intended answers. The fixed filter then selects the analysis population.
 Changed model/template/chat settings require an explicit token recheck command, not an additional unspecified approval workflow.
 The model weights should be loaded only by an extraction command that actually has missing compatible rows.
 The train, evaluate, and report commands will use cached artifacts and fail clearly if those artifacts are absent.
@@ -194,7 +183,7 @@ Provided all required rows and residual layers are already cached, the following
 \item Probe initialization/minibatch seed, independently of the split seed.
 \item Split seed or train/validation/test fractions.
 \item Which existing variants are used for fitting versus OOD evaluation.
-\item Filtering threshold or an explicitly selected raw/canonical filter.
+\item Filtering threshold. The eligibility rule stays the fixed four-step filter.
 \item Recovery task, loss, optimizer, or linear versus stacked-layer probe architecture using existing cached features.
 \item Evaluation metrics or behavioral reports derived from saved logits and labels.
 \end{itemize}
@@ -284,9 +273,8 @@ The detailed implementation plan specifies record schemas, error contracts, cach
   interventions/ # Frozen context instances and preparation provenance.
   prompts/      # Rendered token sequences and audit references.
   extractions/  # All-layer residuals and full-vocabulary logits.
-  analyses/     # Split manifests and both filtering reports.
+  analyses/     # Split manifests and fixed-filter counts.
   views/        # Separate training, validation, and evaluation views.
-  decisions/    # User-selected filter policies.
   runs/         # Probes, training attempts, histories, and selection.
   evaluations/  # Metrics for saved probes and evaluation views.
   reports/      # Readable summaries and generated paper fragments.
