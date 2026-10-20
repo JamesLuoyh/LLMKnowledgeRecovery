@@ -36,9 +36,7 @@ validate configuration and local assets
   -> render both orders for each intervention instance
   -> verify model/template-bound canonical-token audit
   -> extract or reuse residuals and logits for all rows
-  -> write both filtering diagnostics and behavior tables
-  -> ERROR: FilterPolicyDecisionRequired
-  -> [explicit user choice recorded against report]
+  -> write the fixed four-step filter counts and behavior tables
   -> construct split/filter/task views from cache
   -> fit independent layer probes on training variants
   -> select checkpoints and layers on ID validation
@@ -46,9 +44,9 @@ validate configuration and local assets
   -> export metrics, provenance, and paper tables
 \end{verbatim}
 Extraction does not depend on split assignment; the logical split must nevertheless be fixed before eligibility is applied to analysis views.
-The reporting stage will finish writing machine-readable counts and human-readable summaries before raising the policy-decision error with a nonzero exit code.
-The error is an intentional workflow gate, not a failed extraction: all completed cached artifacts must remain reusable.
-Repeated runs with the decision still unset will reproduce the report from cache and stop again.
+The reporting stage writes machine-readable counts and human-readable summaries for the fixed filter.
+It does not stop to choose a probability basis.
+Repeated runs with the same scores reproduce the same counts, and completed extraction artifacts remain reusable.
 Global schema, required-asset, token-contract, and extraction-integrity failures stop the dependent pipeline stage.
 After valid diagnostics exist, method-specific failures must not abort other valid tasks or reports.
 An empty training or validation view marks the affected trainable method unavailable; a one-class training target marks that task's logistic method unavailable with label counts, while its defined constant baseline may still run.
@@ -124,10 +122,8 @@ split:
 filter_correct:
   variant: clean
   splits: [train, val, test]
-  min_correct_prob: 0.8
+  min_correct_prob: 0.8  # strict lower bound on the greedy option's normalized probability
   paired_orders: true
-  probability_basis: null   # intentional mandatory decision gate
-  decision_record: null
 analysis:
   train_variants: [clean, T-C, T-IC]
   eval_variants: [NT-C, NT-IC]  # OOD, held-out test questions only
@@ -204,7 +200,7 @@ src/knowledge_recovery/
     canonical.py               # Raw, conditional, and greedy scoring.
   views/
     splits.py                  # Base-group assignments.
-    filters.py                 # Paired eligibility and decision gate.
+    filters.py                 # Fixed four-step clean eligibility.
     build.py                   # Read-only analysis views over cache.
   tasks/
     base.py                    # RecoveryTask protocol.
@@ -248,7 +244,7 @@ One specification may produce different text for each question and multiple inst
 \item[AnswerScores.] Raw A/B probabilities, canonical A/B probabilities, canonical-label mass, unrestricted greedy token ID, canonical greedy label, invalid-label flag, and scoring-version identifier.
 \item[SplitManifest.] Base-group ID to split mapping, eligible source universe, grouping version, seed, fractions, integer allocations, and manifest digest.
 \item[FilterReport.] Both paired eligibility masks, order-specific failures, population counts, split denominators, canonical-only diagnostics, paths, and report digest.
-\item[DecisionRecord.] Explicit selected probability basis, original filter-report digest, scope of the choice, timestamp, and recorded user instruction; never inferred from retention rate.
+\item[DecisionRecord.] Unused by the fixed filter. The initial protocol does not record a raw-versus-canonical choice.
 Each later analysis manifest records the applicable threshold, current diagnostic report, and inherited decision ID.
 \item[TaskSpec.] Task-specific input/output schemas, target construction, class meaning/order, permitted prediction-time features, decoding convention, and pointwise-score definition.
 \item[MethodSpec.] Task ID, method ID, task-specific adapter/interface version, declared fit/predict inputs, fitting requirement, optional shared architecture, method parameters, and output validation.
@@ -450,16 +446,13 @@ Do not approximate by taking its first or last token.
 \item[AnswerInstructionMismatch.] A direct-answer task or incompatible label set is requested with the one-letter instruction.
 Require an appropriate instruction and a new answer/token audit.
 \item[UnsupportedPositionSelector.] Teacher-forced extraction is requested before that feature exists.
-\item[FilterPolicyDecisionRequired.] Both filtering reports are complete, but no applicable explicit policy decision exists, or the requested basis contradicts the recorded decision.
 \item[MissingLocalAsset.] A required pinned model, tokenizer, or dataset artifact is unavailable offline; show the expected location without automatically downloading.
 \item[CacheIncompatible / CacheIncomplete.] Artifact schemas, identities, tensor shapes, or checksums do not match, or required rows/layers are missing.
 Never silently fall back to model inference during a probe-only command.
 \end{description}
-Changing the filter policy does not invalidate token audits or extraction artifacts.
+Changing the filter threshold does not invalidate token audits or extraction artifacts.
 A changed split manifest or threshold requires a new filtering report, but no new model inference.
-The initial decision scope is the named dataset adapter/source snapshot, model content signature, clean prompt/token contract, canonical answer set, and requirement to qualify both clean orders.
-Within that scope it persists across split/training seeds, split fractions, threshold changes, probe methods, and added evaluation contexts; the new analysis links its report to that decision without asking the user to choose again.
-Changing a scoped component, explicitly resetting the decision, or requesting a contradictory basis reopens the gate after updated diagnostics.
+Eligibility is the fixed four-step rule below, not a recorded probability basis.
 
 \subsection{Model extraction and numerical contract}
 
@@ -665,25 +658,29 @@ Resume only verified completed shards, and distinguish incomplete/corrupt shards
 Use atomic per-row reservations and synchronized global-index updates to prevent concurrent collections from duplicating or overwriting the same extraction row; collection-manifest writes also require a scoped lock.
 Preserve enough metadata to reconcile source IDs, prompt IDs, tensor rows, and analysis rows without relying on processing order.
 
-\subsection{Analysis views and the filtering gate}
+\subsection{Analysis views and the fixed filter}
 
 Sort stable base-group IDs lexicographically before applying \texttt{numpy.random.Generator(numpy.random.PCG64(split\_seed)).permutation(n)}; pin the NumPy version in the execution environment.
 Allocate floor counts for train/validation and assign the remainder to test.
 Save the concrete mapping; seed values alone are insufficient provenance if the source universe changes.
 Split and probe-training seeds are distinct fields: changing only the latter changes probe initialization and minibatch order, not group membership.
 Neither affects extraction.
-Use complete paired rows to derive both clean eligibility masks and report per-split failures for correct-at-A, correct-at-B, either, and both.
+Use complete paired clean rows. A row passes the fixed steps below, and a base question is eligible only when both orders pass.
 Distinguish base questions, intervention instances, paired-order rows, and full prompt expansions in every count; the initial expansion happens to contain ten rows per base question.
 Source-template exclusions, malformed records, and duplicates precede split assignment and remain separate from model-correctness filtering.
 Intervention coverage and overlength diagnostics occur after the split is frozen and cannot change the base split universe.
 
-The diagnostic report will contain raw retained/removed counts, canonical retained/removed counts, overlap, raw-only and canonical-only counts, percentages with denominators, invalid canonical outputs, and canonical mass summaries.
-Raw-only retention should be zero; if not, fail a probability-consistency invariant.
-Behavioral tables will cover all valid base questions and each candidate filtered population, under separately named raw and canonical scoring.
-Persist report data and readable tables before emitting the intentional policy error.
-No training command may bypass this by supplying an implicit default probability basis.
-The initial explicit user decision will set \texttt{raw} or \texttt{canonical} and reference the report digest.
-Later compatible runs will inherit the choice and record both their current report and the original decision rather than reopening the gate for every seed.
+Apply these steps in order. The threshold comparison is strict.
+\begin{enumerate}
+\item The unrestricted greedy token is one of the answer options.
+\item That option's probability in the normalized A/B distribution is greater than \texttt{min\_correct\_prob} (initially 0.8). This is not the raw probability, and it is not yet required to be the correct label.
+\item That greedy option equals the correct label for the order.
+\item Both clean orders passed the first three steps.
+\end{enumerate}
+For the whole input and for each split, report the sample count before any step and after each step in three sets: both orders (two samples per base question), orders whose correct answer is placed at A, and orders whose correct answer is placed at B.
+After the fourth step the A count equals the B count, and the both-orders count is twice that number.
+Behavioral tables still use separately named raw-token and canonical-label scoring.
+The filter does not choose or record a probability basis.
 
 Construct training and validation views from \{clean, T-C, T-IC\} on their respective base splits.
 Construct ID test views from that same set on test base questions, and OOD test views from \{NT-C, NT-IC\} on test base questions.
@@ -697,7 +694,7 @@ The awareness target is equality between the clean and contextual canonical argm
 Exact unrestricted greedy-token equality will be computed from cache for separately named behavioral diagnostics, not used as the primary awareness target.
 Knowledge consistency always uses a normalized A/B output with a hard clean canonical argmax target in the initial version.
 It does not attempt to represent an arbitrary unrestricted clean token outside A/B, and it does not train against the soft clean probability vector unless a future task/loss explicitly requests distillation.
-The unresolved raw-versus-canonical filtering decision controls eligibility only; either choice preserves these canonical target definitions.
+The fixed four-step filter controls eligibility only. It preserves these canonical target definitions.
 
 \paragraph{Task-specific method interfaces and shared architectures.}
 Register methods by the pair \texttt{(task\_id, method\_id)}, not by architecture name alone.
@@ -830,13 +827,13 @@ Verify that distinct questions receive their own joined contexts, both orders sh
 Implement the Qwen adapter, last-token selection, token-audit errors, tensor shards, atomic completion, and resume.
 Acceptance: batched/unbatched padded fixtures agree within declared tolerances; hook semantics reproduce actual forward logits where checked; modified model/template/chat flags trigger the audit gate.
 \item \textbf{Cache-backed diagnostics.}
-Implement scoring, grouped splits, paired filters, behavioral tables, and the decision gate.
-Acceptance: a fixture with high conditional but low raw answer probability distinguishes the policies; all requested counts have correct base-group denominators; reports are durable before the intentional error.
+Implement scoring, grouped splits, the fixed four-step filter, and behavioral tables.
+Acceptance: a hand fixture shows the count after each step for both orders and for each correct-answer position; an option probability equal to the threshold does not pass; a greedy token outside A/B fails the first step; a question is eligible only when both orders pass.
 \item \textbf{Probe fitting and selection.}
 Implement both tasks, linear probes, BCE, training-only transforms, checkpoints, and validation layer selection.
 Implement the two baseline methods using separate task registrations; reject cross-task method reuse even when input/output shapes happen to match.
 Acceptance: changing test labels cannot change selected layers; OOD rows never enter fitting; altered seeds and split ratios reuse extraction artifacts; missing caches fail without model loading.
-Include a fixture whose unrestricted greedy token changes while its canonical argmax remains fixed: its primary awareness label must remain agreement, and its recovery target must remain the clean canonical label under either eligibility policy whenever retained.
+Include a fixture whose unrestricted greedy token changes while its canonical argmax remains fixed: its primary awareness label must remain agreement, and its recovery target must remain the clean canonical label whenever the row is retained.
 \item \textbf{Evaluation and handoff.}
 Implement ECE/bin exports, baselines, selected-layer test evaluation, artifact manifests, and generated paper tables.
 Verify scalar Brier against a hand-computable fixture, fixed-frequency awareness predictions against training-label counts, and contextual-answer predictions against cached canonical probabilities.
@@ -844,8 +841,7 @@ Verify that saved predictions suffice to recompute point metrics with model load
 Acceptance: small hand-computable probability fixtures verify CE/Brier/$K$/ECE; clean deviation is zero; paired counts satisfy set-intersection bounds.
 \item \textbf{GPU integration run.}
 After implementation is authorized, run a small explicitly labeled integration subset using local assets, then the complete extraction/diagnostic stage.
-The integration run must stop at the same filter-policy gate as the full run.
-Do not train the actual experiment until the user selects a policy after seeing its diagnostic report.
+The integration run applies the same fixed filter as the full run and does not stop for a raw-versus-canonical choice.
 \end{enumerate}
 Tests should verify scientific invariants and observable behavior rather than mirror implementation details.
 Use deliberately tiny synthetic fixtures for split leakage, calibration calculations, interrupted writes, and missing-asset handling.
