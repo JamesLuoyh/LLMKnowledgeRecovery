@@ -793,7 +793,6 @@ def _audit(config: ExperimentConfig, *, recheck: bool):
         canonical_strings=config.extraction.verbalizers,
         model_content_digest=assets.weight_content_digest,
         tokenizer_content_digest=assets.tokenizer_content_digest,
-        template_name=config.extraction.prompt_template,
         chat=config.extraction.chat,
         system_message=config.extraction.system_message,
         instruction=config.extraction.instruction,
@@ -877,7 +876,6 @@ def _reuse_collection(storage: Path, collection_path: Path, config: ExperimentCo
 
 def _prompt_contract(config: ExperimentConfig, audit):
     return prompt_contract(
-        template=config.extraction.prompt_template,
         chat=config.extraction.chat,
         system_message=config.extraction.system_message,
         instruction=config.extraction.instruction,
@@ -922,7 +920,6 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
         },
         "prompt": {
             "chat": extraction.chat,
-            "template": extraction.prompt_template,
             "system_message": extraction.system_message,
             "instruction": extraction.instruction,
             "labels": list(extraction.labels),

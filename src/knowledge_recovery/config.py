@@ -139,7 +139,6 @@ class ExtractionConfig:
     source_filter_field: str
     source_filter_value: str
     chat: bool
-    prompt_template: str
     system_message: str | None
     instruction: str
     intervention_registry: str
@@ -304,7 +303,7 @@ def _extraction(raw: Any) -> ExtractionConfig:
     prompt = _object(
         body["prompt"],
         "extraction.prompt",
-        ("chat", "template", "system_message", "instruction"),
+        ("chat", "system_message", "instruction"),
     )
     interventions = _object(
         body["interventions"],
@@ -450,7 +449,6 @@ def _extraction(raw: Any) -> ExtractionConfig:
         source_filter_field="prompt_template",
         source_filter_value="{question}",
         chat=chat,
-        prompt_template=_text(prompt["template"], "extraction.prompt.template"),
         system_message=system_message,
         instruction=instruction,
         intervention_registry=registry,

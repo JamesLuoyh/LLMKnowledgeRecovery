@@ -42,7 +42,6 @@ def _model():
 
 def _contract(**overrides):
     payload = {
-        "template": "native_pinned",
         "chat": True,
         "system_message": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
         "instruction": "Answer with exactly one letter. Do not include any other text.",
@@ -282,9 +281,9 @@ def test_prompt_array_order_changes_the_signature_and_key_order_does_not():
 
 
 def test_prompt_contract_keeps_text_and_rejects_audit_locations():
-    exact = _contract(template="native_pinned ")
+    exact = _contract(instruction="Answer with exactly one letter. Do not include any other text. ")
     assert exact.digest != _contract().digest
-    assert "native_pinned " in exact.canonical_json
+    assert "other text. " in exact.canonical_json
     assert _contract(verbalizers=["A", "B"]).digest != _contract(verbalizers=["B", "A"]).digest
     silent = _contract(chat=False, system_message=None)
     assert '"chat":false' in silent.canonical_json

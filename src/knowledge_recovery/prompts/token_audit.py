@@ -129,7 +129,6 @@ def audit_canonical_tokens(
     canonical_strings: Sequence[str] = ("A", "B"),
     model_content_digest: str,
     tokenizer_content_digest: str,
-    template_name: str,
     chat: bool,
     system_message: str | None,
     instruction: str,
@@ -168,7 +167,6 @@ def audit_canonical_tokens(
         "tokenizer_settings": dict(tokenizer.settings()),
         "chat": chat,
         "template": {
-            "name": template_name,
             "system_message": system_message,
             "renderer_version": renderer_version,
         },

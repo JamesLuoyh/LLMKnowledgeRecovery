@@ -7,19 +7,19 @@ extraction:
   assets:
     offline: true
     allow_download: false
-    model_path: REQUIRED_LOCAL_PATH
-    dataset_path: REQUIRED_LOCAL_PATH_OR_SNAPSHOT
+    model_path: /research/projects/ecoai/gks43/hf_cache/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
+    dataset_path: /research/projects/ecoai/LLMKnowledgeRecovery/datasets/sycophancy_eval_answer/rows.json
   model:
     name: Qwen/Qwen2.5-7B-Instruct
-    revision: REQUIRED_PINNED_REVISION_OR_CONTENT_HASH
-    tokenizer_revision: REQUIRED_PINNED_REVISION_OR_CONTENT_HASH
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    tokenizer_revision: a09a35458c702b33eeacc393d103063234e8bc28
     precision: bf16
     quantization: none
   dataset:
     adapter: sycophancy
     name: cfierro/sycophancy_eval_answer
     split: test
-    revision: REQUIRED_PINNED_REVISION_OR_CONTENT_HASH
+    revision: 765eee01408da494261bc700ded44da9833cd34e
     regenerate_variants: true
     clean_question_path: base.question
     correct_answer_path: base.correct_answer
@@ -29,7 +29,6 @@ extraction:
       exact_value: "{question}"
   prompt:
     chat: true
-    template: native_pinned
     system_message: "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
     instruction: "Answer with exactly one letter. Do not include any other text."
   interventions:
