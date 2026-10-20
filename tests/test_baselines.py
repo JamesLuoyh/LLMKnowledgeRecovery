@@ -107,8 +107,10 @@ def test_an_awareness_method_cannot_be_used_for_consistency_when_shapes_match():
     with pytest.raises(MethodTaskMismatch, match="tensor shapes"):
         require_task(decoy, "knowledge_consistency")
     assert registered_pairs() == (
+        ("behavioral_awareness", "linear"),
         ("behavioral_awareness", "training_frequency"),
         ("knowledge_consistency", "contextual_answer"),
+        ("knowledge_consistency", "linear"),
     )
     with pytest.raises(MethodTaskMismatch, match="linear_agreement"):
         require_task(type("Probe", (), {"task_id": "behavioral_awareness", "method_id": "linear_agreement"})(), "behavioral_awareness")
