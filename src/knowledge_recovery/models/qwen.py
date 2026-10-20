@@ -382,15 +382,16 @@ class QwenContinuationTokenizer:
 
     def encode_prompt(self, example: PromptExample) -> tuple[int, ...]:
         if example.chat:
-            ids = self.tokenizer.apply_chat_template(
+            encoding = self.tokenizer.apply_chat_template(
                 [
                     {"role": "system", "content": example.system_message},
                     {"role": "user", "content": example.user_text},
                 ],
                 add_generation_prompt=True,
                 tokenize=True,
+                return_dict=True,
             )
-            return tuple(int(item) for item in ids)
+            return tuple(int(item) for item in encoding["input_ids"])
         return tuple(int(item) for item in self.tokenizer.encode(example.user_text, add_special_tokens=False))
 
     def continuation_ids(self, prompt_ids: Sequence[int], answer: str) -> tuple[int, ...]:
@@ -428,7 +429,7 @@ def numeric_runtime_signature(model_config: Mapping[str, Any], *, precision: str
     device_name = torch.cuda.get_device_name(0) if cuda else "cpu"
     return {
         "backend": "torch",
-        "torch_version": torch.__version__,
+        "torch_version": str(torch.__version__),
         "transformers_version": transformers.__version__,
         "numpy_version": numpy.__version__,
         "device_type": "cuda" if cuda else "cpu",
@@ -457,7 +458,7 @@ def _load_qwen_weights(path: Path, *, precision: str, config: dict[str, Any]) ->
     inner = AutoModelForCausalLM.from_pretrained(
         path,
         local_files_only=True,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation="eager",
     )
     inner.to(device)

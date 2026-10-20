@@ -30,6 +30,8 @@ REPORTING_SETTINGS = (
     "calibration_bins",
     "filter_threshold",
     "min_correct_prob",
+    "variant_stats",
+    "require_all_variants",
     "probability_basis",
     "ood_variants",
     "test_variants",

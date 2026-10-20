@@ -19,6 +19,14 @@ class RowNote:
     reason: str
     template: str | None = None
 
+    def payload(self) -> dict[str, object]:
+        return {
+            "index": self.index,
+            "source_row_id": self.source_row_id,
+            "reason": self.reason,
+            "template": self.template,
+        }
+
 
 @dataclass(frozen=True)
 class NormalizationReport:

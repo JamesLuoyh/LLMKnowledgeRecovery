@@ -3,7 +3,7 @@ import json
 import pytest
 
 from knowledge_recovery.provenance import content_digest
-from knowledge_recovery.views import CleanOrder, apply_filter_gate
+from knowledge_recovery.views import CleanOrder, apply_filter_gate, apply_variant_gate
 
 
 def _order(group, split, order_id, canonical, *, invalid=False, raw=(0.1, 0.1)):
@@ -110,3 +110,91 @@ def test_incomplete_pairs_and_an_empty_input_are_explicit(tmp_path):
         "after_greedy_correct": 0,
         "after_both_orders_correct": 0,
     }
+
+
+def _variant_fixture():
+    """Pool q1-q3 plus q_out, which is outside the pool and must be ignored."""
+    return {
+        "T-C": [
+            _order("q1", "train", "correct_at_A", (0.9, 0.1)),
+            _order("q1", "train", "correct_at_B", (0.1, 0.9)),
+            _order("q2", "val", "correct_at_A", (0.95, 0.05)),
+            _order("q2", "val", "correct_at_B", (0.5, 0.5)),
+            _order("q3", "test", "correct_at_A", (0.9, 0.1)),
+            _order("q3", "test", "correct_at_B", (0.1, 0.9)),
+            _order("q_out", "train", "correct_at_A", (0.1, 0.9), invalid=True),
+            _order("q_out", "train", "correct_at_B", (0.1, 0.9), invalid=True),
+        ],
+        # The confident wrong answer on q1 still passes: there is no correct-label step.
+        "T-IC": [
+            _order("q1", "train", "correct_at_A", (0.1, 0.9)),
+            _order("q1", "train", "correct_at_B", (0.9, 0.1)),
+            _order("q2", "val", "correct_at_A", (0.9, 0.1)),
+            _order("q2", "val", "correct_at_B", (0.1, 0.9)),
+            _order("q3", "test", "correct_at_A", (0.9, 0.1), invalid=True),
+            _order("q3", "test", "correct_at_B", (0.1, 0.9)),
+        ],
+    }
+
+
+def _variant_record(directory):
+    payload = json.loads((directory / "variant_filter_report.json").read_text())
+    assert payload["digest"] == content_digest(payload["record"])
+    return payload["record"]
+
+
+def test_variant_gate_counts_three_steps_on_the_pool_without_a_correct_label(tmp_path):
+    outcome = apply_variant_gate(_variant_fixture(), ["q1", "q2", "q3"], output_directory=tmp_path)
+    assert outcome.passed_by_variant == {"T-C": ("q1", "q3"), "T-IC": ("q1", "q2")}
+    assert outcome.eligible_base_group_ids == ("q1", "q2", "q3")
+    record = _variant_record(tmp_path)
+    counts = record["population_counts"]
+    assert "final" not in counts
+    assert counts["T-C"]["overall"]["both_orders"] == {
+        "before": 6,
+        "after_greedy_is_option": 6,
+        "after_option_probability": 5,
+        "after_both_orders_confident": 4,
+    }
+    assert counts["T-C"]["overall"]["correct_at_B"] == {
+        "before": 3,
+        "after_greedy_is_option": 3,
+        "after_option_probability": 2,
+        "after_both_orders_confident": 2,
+    }
+    assert counts["T-IC"]["overall"]["both_orders"] == {
+        "before": 6,
+        "after_greedy_is_option": 5,
+        "after_option_probability": 5,
+        "after_both_orders_confident": 4,
+    }
+    assert counts["T-IC"]["by_split"]["test"]["both_orders"]["after_both_orders_confident"] == 0
+    assert record["order_failures"]["T-IC"]["both_orders"] == {"1": 1, "2": 0, "3": 1}
+    assert record["paired_eligibility"]["require_correct_label"] is False
+    text = (tmp_path / "variant_filter_report.txt").read_text()
+    assert "Variant: T-C" in text and "Variant: T-IC" in text
+    assert "Pool: base questions that passed the clean filter (3 questions, 6 rows per variant)" in text
+    assert "Final filter across all variants: not applied" in text
+
+
+def test_require_all_keeps_questions_that_pass_every_variant(tmp_path):
+    outcome = apply_variant_gate(
+        _variant_fixture(), ["q1", "q2", "q3"], output_directory=tmp_path, require_all=True
+    )
+    assert outcome.eligible_base_group_ids == ("q1",)
+    final = _variant_record(tmp_path)["population_counts"]["final"]
+    assert final["overall"] == {"base_questions": 1, "prompt_rows_per_variant": 2}
+    assert final["by_split"]["train"] == {"base_questions": 1, "prompt_rows_per_variant": 2}
+    assert final["by_split"]["val"] == {"base_questions": 0, "prompt_rows_per_variant": 0}
+    text = (tmp_path / "variant_filter_report.txt").read_text()
+    assert "Final (all variants)" in text
+    assert "Kept: questions that passed step 3 on T-C, T-IC" in text
+
+
+def test_variant_gate_requires_every_pool_question(tmp_path):
+    fixture = _variant_fixture()
+    fixture["T-IC"] = fixture["T-IC"][:4]
+    with pytest.raises(ValueError, match="variant T-IC is missing pool questions: q3"):
+        apply_variant_gate(fixture, ["q1", "q2", "q3"], output_directory=tmp_path)
+    with pytest.raises(ValueError, match="missing T-C orders"):
+        apply_variant_gate({"T-C": fixture["T-C"][:1]}, ["q1"], output_directory=tmp_path)

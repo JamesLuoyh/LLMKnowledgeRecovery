@@ -6,6 +6,10 @@ that option is the correct label. A base question is eligible when both of
 its clean orders pass. The report counts samples before the filters and
 after each step, for both orders together and for each correct-answer
 position. There is no raw-versus-canonical choice.
+
+The optional variant gate applies steps 1 and 2 to each intervened variant,
+starting from the questions that passed the clean filter, and then requires
+both orders to pass. It has no correct-label step.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +34,12 @@ COUNT_STEPS = (
     "after_option_probability",
     "after_greedy_correct",
     "after_both_orders_correct",
+)
+VARIANT_COUNT_STEPS = (
+    "before",
+    "after_greedy_is_option",
+    "after_option_probability",
+    "after_both_orders_confident",
 )
 
 
@@ -88,6 +98,19 @@ class FilterOutcome:
     min_correct_prob: float
 
 
+@dataclass(frozen=True)
+class VariantFilterOutcome:
+    """Questions that passed each variant, and the final eligible set.
+
+    Without ``require_all`` the final set is the clean-filtered pool unchanged.
+    """
+
+    eligible_base_group_ids: tuple[str, ...]
+    passed_by_variant: Mapping[str, tuple[str, ...]]
+    report_digest: str
+    min_correct_prob: float
+
+
 def apply_filter_gate(
     orders: Sequence[CleanOrder],
     *,
@@ -115,7 +138,79 @@ def apply_filter_gate(
     )
 
 
-def _pairs(orders: Sequence[CleanOrder], threshold: float) -> tuple[_Pair, ...]:
+def apply_variant_gate(
+    orders_by_variant: Mapping[str, Sequence[CleanOrder]],
+    pool_ids: Sequence[str],
+    *,
+    output_directory: str | Path,
+    min_correct_prob: float = 0.8,
+    require_all: bool = False,
+) -> VariantFilterOutcome:
+    """Write three-step counts per variant over the clean-filtered pool.
+
+    Orders outside ``pool_ids`` are ignored. Every pool question must have
+    both orders in every variant. With ``require_all`` the final set keeps
+    only questions that passed on every variant.
+    """
+    threshold = _threshold(min_correct_prob)
+    if not isinstance(orders_by_variant, Mapping) or not orders_by_variant:
+        raise ValueError("orders_by_variant must be a non-empty mapping")
+    if type(require_all) is not bool:
+        raise TypeError("require_all must be a boolean")
+    pool = tuple(sorted(set(pool_ids)))
+    allowed = set(pool)
+    pairs_by_variant: dict[str, tuple[_Pair, ...]] = {}
+    for variant_id, orders in orders_by_variant.items():
+        if type(variant_id) is not str or variant_id == "":
+            raise ValueError("variant ids must be non-empty strings")
+        if isinstance(orders, (str, bytes)) or not isinstance(orders, Sequence):
+            raise TypeError("orders must be a sequence of CleanOrder values")
+        chosen = [order for order in orders if order.base_group_id in allowed]
+        pairs = _pairs(chosen, threshold, require_correct=False, label=variant_id)
+        missing = allowed - {pair.base_group_id for pair in pairs}
+        if missing:
+            raise ValueError(
+                f"variant {variant_id} is missing pool questions: {', '.join(sorted(missing))}"
+            )
+        pairs_by_variant[variant_id] = pairs
+    passed = {
+        variant_id: tuple(pair.base_group_id for pair in pairs if pair.passed)
+        for variant_id, pairs in pairs_by_variant.items()
+    }
+    if require_all:
+        survivors = set(pool)
+        for ids in passed.values():
+            survivors &= set(ids)
+        eligible = tuple(sorted(survivors))
+    else:
+        eligible = pool
+    splits = {pair.base_group_id: pair.split for pairs in pairs_by_variant.values() for pair in pairs}
+    directory = Path(output_directory)
+    report = _variant_report(
+        pairs_by_variant,
+        pool=pool,
+        eligible=eligible,
+        splits=splits,
+        threshold=threshold,
+        require_all=require_all,
+        directory=directory,
+    )
+    digest = _write(directory, report, _render_variants(report), stem="variant_filter_report")
+    return VariantFilterOutcome(
+        eligible_base_group_ids=eligible,
+        passed_by_variant=passed,
+        report_digest=digest,
+        min_correct_prob=threshold,
+    )
+
+
+def _pairs(
+    orders: Sequence[CleanOrder],
+    threshold: float,
+    *,
+    require_correct: bool = True,
+    label: str = "clean",
+) -> tuple[_Pair, ...]:
     if isinstance(orders, (str, bytes)) or not isinstance(orders, Sequence):
         raise TypeError("orders must be a sequence of CleanOrder values")
     grouped: dict[str, dict[str, CleanOrder]] = {}
@@ -124,20 +219,21 @@ def _pairs(orders: Sequence[CleanOrder], threshold: float) -> tuple[_Pair, ...]:
             raise TypeError("orders must be a sequence of CleanOrder values")
         found = grouped.setdefault(order.base_group_id, {})
         if order.order_id in found:
-            raise ValueError(f"duplicate clean order for {order.base_group_id} {order.order_id}")
+            raise ValueError(f"duplicate {label} order for {order.base_group_id} {order.order_id}")
         found[order.order_id] = order
+    needed = 3 if require_correct else 2
     pairs: list[_Pair] = []
     for base_group_id in sorted(grouped):
         found = grouped[base_group_id]
         if set(found) != set(ORDERS):
             missing = [name for name in ORDERS if name not in found]
             raise ValueError(
-                f"base group {base_group_id} is missing clean orders: {', '.join(missing)}"
+                f"base group {base_group_id} is missing {label} orders: {', '.join(missing)}"
             )
         first, second = found["correct_at_A"], found["correct_at_B"]
         if first.split != second.split:
-            raise ValueError(f"base group {base_group_id} has clean orders in different splits")
-        passed = _last_step(first, threshold) >= 3 and _last_step(second, threshold) >= 3
+            raise ValueError(f"base group {base_group_id} has {label} orders in different splits")
+        passed = _last_step(first, threshold) >= needed and _last_step(second, threshold) >= needed
         pairs.append(_Pair(base_group_id, first.split, first, second, passed))
     return tuple(pairs)
 
@@ -264,6 +360,151 @@ def _in_split(pairs: Sequence[_Pair], split: str) -> tuple[_Pair, ...]:
     return tuple(pair for pair in pairs if pair.split == split)
 
 
+def _count_set(pairs: Sequence[_Pair], count_set: str) -> list[CleanOrder]:
+    chosen: list[CleanOrder] = []
+    for pair in pairs:
+        if count_set == "correct_at_A":
+            chosen.append(pair.correct_at_a)
+        elif count_set == "correct_at_B":
+            chosen.append(pair.correct_at_b)
+        else:
+            chosen.extend((pair.correct_at_a, pair.correct_at_b))
+    return chosen
+
+
+def _variant_report(
+    pairs_by_variant: Mapping[str, Sequence[_Pair]],
+    *,
+    pool: Sequence[str],
+    eligible: Sequence[str],
+    splits: Mapping[str, str],
+    threshold: float,
+    require_all: bool,
+    directory: Path,
+) -> FilterReport:
+    population: dict[str, Any] = {
+        variant_id: {
+            "overall": _variant_block(pairs, threshold),
+            "by_split": {
+                split: _variant_block(_in_split(pairs, split), threshold) for split in SPLITS
+            },
+        }
+        for variant_id, pairs in pairs_by_variant.items()
+    }
+    if require_all:
+        population["final"] = {
+            "overall": _final_units(eligible),
+            "by_split": {
+                split: _final_units([group for group in eligible if splits.get(group) == split])
+                for split in SPLITS
+            },
+        }
+    return FilterReport(
+        paired_eligibility={
+            "variants": list(pairs_by_variant),
+            "threshold": threshold,
+            "comparison": "greater_than",
+            "require_both_orders": True,
+            "require_correct_label": False,
+            "require_all_variants": require_all,
+            "pool_size": len(pool),
+            "eligible_base_group_ids": list(eligible),
+        },
+        order_failures={
+            variant_id: _variant_failures(pairs, threshold)
+            for variant_id, pairs in pairs_by_variant.items()
+        },
+        population_counts=population,
+        split_denominators={
+            split: _final_units([group for group in pool if splits.get(group) == split])
+            for split in SPLITS
+        },
+        canonical_only_diagnostics={
+            "policy": "variant_three_step",
+            "pool": "clean_filter_eligible",
+            "steps": list(VARIANT_COUNT_STEPS[1:]),
+            "option_probability": "normalized_ab",
+        },
+        paths={
+            "directory": str(directory),
+            "json": "variant_filter_report.json",
+            "text": "variant_filter_report.txt",
+        },
+    )
+
+
+def _variant_block(pairs: Sequence[_Pair], threshold: float) -> dict[str, Any]:
+    block = {}
+    for count_set in COUNT_SETS:
+        chosen = _count_set(pairs, count_set)
+        passed = {pair.base_group_id for pair in pairs if pair.passed}
+        block[count_set] = {
+            "before": len(chosen),
+            "after_greedy_is_option": sum(_last_step(order, threshold) >= 1 for order in chosen),
+            "after_option_probability": sum(_last_step(order, threshold) >= 2 for order in chosen),
+            "after_both_orders_confident": sum(order.base_group_id in passed for order in chosen),
+        }
+    return block
+
+
+def _variant_failures(pairs: Sequence[_Pair], threshold: float) -> dict[str, Any]:
+    """First failed step per order. Step 3 counts orders whose pair partner failed."""
+    passed = {pair.base_group_id for pair in pairs if pair.passed}
+    body = {}
+    for count_set in COUNT_SETS:
+        failed = {"1": 0, "2": 0, "3": 0}
+        for order in _count_set(pairs, count_set):
+            reached = _last_step(order, threshold)
+            if reached < 2:
+                failed[str(reached + 1)] += 1
+            elif order.base_group_id not in passed:
+                failed["3"] += 1
+        body[count_set] = failed
+    return body
+
+
+def _final_units(group_ids: Sequence[str]) -> dict[str, int]:
+    count = len(group_ids)
+    return {"base_questions": count, "prompt_rows_per_variant": count * 2}
+
+
+def _render_variants(report: FilterReport) -> str:
+    fields = report.payload()
+    eligibility = fields["paired_eligibility"]
+    pool = eligibility["pool_size"]
+    lines = [
+        "Intervened-variant filter",
+        f"Pool: base questions that passed the clean filter ({pool} questions, {pool * 2} rows per variant)",
+        f"Threshold: greater than {eligibility['threshold']} on the normalized option probability",
+        "1. The unrestricted greedy token is an option.",
+        "2. That option's normalized probability is greater than the threshold.",
+        "3. Both orders passed steps 1-2.",
+        "The option does not need to be the correct label.",
+    ]
+    counts = fields["population_counts"]
+    for variant_id in eligibility["variants"]:
+        lines.extend(["", f"Variant: {variant_id}", "Overall"])
+        _append_block(lines, counts[variant_id]["overall"], VARIANT_COUNT_STEPS)
+        for split in SPLITS:
+            lines.extend(["", f"Split {split}"])
+            _append_block(lines, counts[variant_id]["by_split"][split], VARIANT_COUNT_STEPS)
+    if eligibility["require_all_variants"]:
+        final = counts["final"]
+        lines.extend([
+            "",
+            "Final (all variants)",
+            f"Kept: questions that passed step 3 on {', '.join(eligibility['variants'])}",
+            "Overall",
+        ])
+        lines.extend(f"  {key}: {value}" for key, value in final["overall"].items())
+        for split in SPLITS:
+            lines.append(f"Split {split}")
+            lines.extend(f"  {key}: {value}" for key, value in final["by_split"][split].items())
+    else:
+        lines.extend(["", "Final filter across all variants: not applied"])
+    return "\n".join(lines) + "\n"
+
+
 def _render(report: FilterReport) -> str:
     fields = report.payload()
     eligibility = fields["paired_eligibility"]
@@ -287,20 +528,22 @@ def _render(report: FilterReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _append_block(lines: list[str], block: dict[str, Any]) -> None:
+def _append_block(
+    lines: list[str], block: dict[str, Any], steps: Sequence[str] = COUNT_STEPS
+) -> None:
     for count_set in COUNT_SETS:
         lines.append(count_set)
         counts = block[count_set]
-        for step in COUNT_STEPS:
+        for step in steps:
             lines.append(f"  {step}: {counts[step]}")
 
 
-def _write(directory: Path, report: FilterReport, text: str) -> str:
+def _write(directory: Path, report: FilterReport, text: str, *, stem: str = "filter_report") -> str:
     directory.mkdir(parents=True, exist_ok=True)
     artifact = identify(report)
     sidecar = json.dumps(artifact.sidecar(), indent=2, sort_keys=True, allow_nan=False) + "\n"
-    _atomic_text(directory / "filter_report.json", sidecar)
-    _atomic_text(directory / "filter_report.txt", text)
+    _atomic_text(directory / f"{stem}.json", sidecar)
+    _atomic_text(directory / f"{stem}.txt", text)
     if content_digest(json.loads(artifact.canonical_json)) != artifact.digest:
         raise RuntimeError("filter report digest does not match its canonical JSON")
     return artifact.digest

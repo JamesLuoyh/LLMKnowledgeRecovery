@@ -173,6 +173,8 @@ class AnalysisViewConfig:
     eval_variants: tuple[str, ...]
     agreement_basis: str
     recovery_target: str
+    variant_stats: bool = False
+    require_all_variants: bool = False
 
 
 @dataclass(frozen=True)
@@ -487,9 +489,24 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         body["filter_correct"],
         "analysis_view.filter_correct",
         ("variant", "splits", "min_correct_prob", "paired_orders"),
+        ("variant_stats", "require_all_variants"),
     )
     if chosen["paired_orders"] is not True:
         raise ConfigurationError("analysis_view.filter_correct.paired_orders must be true")
+    variant_stats = (
+        _bool(chosen, "variant_stats", "analysis_view.filter_correct")
+        if "variant_stats" in chosen
+        else False
+    )
+    require_all_variants = (
+        _bool(chosen, "require_all_variants", "analysis_view.filter_correct")
+        if "require_all_variants" in chosen
+        else False
+    )
+    if require_all_variants and not variant_stats:
+        raise ConfigurationError(
+            "analysis_view.filter_correct.require_all_variants needs variant_stats: true"
+        )
     analysis = _object(
         body["analysis"],
         "analysis_view.analysis",
@@ -520,6 +537,8 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         eval_variants=_strings(analysis, "eval_variants", "analysis_view.analysis"),
         agreement_basis="canonical",
         recovery_target="clean_canonical_argmax",
+        variant_stats=variant_stats,
+        require_all_variants=require_all_variants,
     )
 
 

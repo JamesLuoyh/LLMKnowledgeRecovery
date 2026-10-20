@@ -220,3 +220,23 @@ def test_assets_are_checked_before_work(tmp_path):
     with pytest.raises(MissingLocalAsset, match="model"):
         validate_before_expensive_work(_load(absent_model, tmp_path), repository_root=ROOT)
     assert not (root / "missing-model").exists()
+
+
+def test_variant_filter_flags_default_off_and_the_final_filter_needs_stats(tmp_path):
+    shipped = _shipped().analysis_view
+    assert shipped.variant_stats is True
+    assert shipped.require_all_variants is False
+    omitted = _document()
+    del omitted["analysis_view"]["filter_correct"]["variant_stats"]
+    del omitted["analysis_view"]["filter_correct"]["require_all_variants"]
+    view = _load(omitted, tmp_path).analysis_view
+    assert (view.variant_stats, view.require_all_variants) == (False, False)
+    dependent = _document()
+    dependent["analysis_view"]["filter_correct"]["variant_stats"] = False
+    dependent["analysis_view"]["filter_correct"]["require_all_variants"] = True
+    with pytest.raises(ConfigurationError, match="require_all_variants needs variant_stats"):
+        _load(dependent, tmp_path)
+    loose = _document()
+    loose["analysis_view"]["filter_correct"]["variant_stats"] = "yes"
+    with pytest.raises(ConfigurationError, match="variant_stats must be an explicit boolean"):
+        _load(loose, tmp_path)

@@ -67,6 +67,10 @@ analysis_view:
     splits: [train, val, test]
     min_correct_prob: 0.8
     paired_orders: true
+    # Three-step counts per intervened variant over the clean-filtered pool. Report only.
+    variant_stats: true
+    # Keep only questions that pass on every intervened variant. Needs variant_stats.
+    require_all_variants: false
   analysis:
     train_variants: [clean, T-C, T-IC]
     eval_variants: [NT-C, NT-IC]
