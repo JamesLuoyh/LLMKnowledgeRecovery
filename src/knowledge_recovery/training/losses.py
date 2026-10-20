@@ -29,7 +29,7 @@ def mean_binary_cross_entropy(
 ) -> float:
     """Mean stable BCE. A logit of large magnitude stays finite."""
     scores = numpy.asarray(logits, dtype=numpy.float64)
-    labels = numpy.asarray(targets, dtype=numpy.float64)
+    labels = numpy.asarray(targets, dtype=numpy.float32)
     if scores.shape != labels.shape or scores.ndim != 1 or scores.shape[0] == 0:
         raise ValueError("logits and targets must be non-empty vectors of equal length")
     reject_ood(domains, int(scores.shape[0]), stage="the loss")
@@ -44,10 +44,10 @@ def binary_cross_entropy_gradients(
     targets: numpy.ndarray,
 ) -> tuple[float, numpy.ndarray, float]:
     """Mean-batch BCE and its gradients for one linear logit."""
-    design = numpy.asarray(features, dtype=numpy.float64)
-    coefficient = numpy.asarray(weight, dtype=numpy.float64)
-    labels = numpy.asarray(targets, dtype=numpy.float64)
-    logits = design @ coefficient + bias
+    design = numpy.asarray(features, dtype=numpy.float32)
+    coefficient = numpy.asarray(weight, dtype=numpy.float32)
+    labels = numpy.asarray(targets, dtype=numpy.float32)
+    logits = design @ coefficient + numpy.float32(bias)
     loss = mean_binary_cross_entropy(logits, labels)
     probabilities = _sigmoid(logits)
     residual = (probabilities - labels) / labels.shape[0]

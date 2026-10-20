@@ -51,7 +51,7 @@ class AdamState:
 
     @classmethod
     def zeros(cls, width: int) -> AdamState:
-        return cls(numpy.zeros(width), numpy.zeros(width), 0.0, 0.0, 0)
+        return cls(numpy.zeros(width, dtype=numpy.float32), numpy.zeros(width, dtype=numpy.float32), 0.0, 0.0, 0)
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ def adamw_step(
     beta1, beta2 = profile.betas
     state.step += 1
     step = state.step
-    grad_w = numpy.asarray(grad_weight, dtype=numpy.float64)
+    grad_w = numpy.asarray(grad_weight, dtype=numpy.float32)
     state.exp_avg_weight = beta1 * state.exp_avg_weight + (1.0 - beta1) * grad_w
     state.exp_avg_sq_weight = beta2 * state.exp_avg_sq_weight + (1.0 - beta2) * grad_w * grad_w
     state.exp_avg_bias = beta1 * state.exp_avg_bias + (1.0 - beta1) * grad_bias
@@ -93,12 +93,12 @@ def adamw_step(
     correction1 = 1.0 - beta1**step
     correction2 = 1.0 - beta2**step
     step_size = profile.learning_rate / correction1
-    decayed = numpy.asarray(weight, dtype=numpy.float64) * (1.0 - profile.learning_rate * profile.weight_decay)
+    decayed = numpy.asarray(weight, dtype=numpy.float32) * (1.0 - profile.learning_rate * profile.weight_decay)
     denom_weight = numpy.sqrt(state.exp_avg_sq_weight / correction2) + profile.epsilon
     denom_bias = math_sqrt(state.exp_avg_sq_bias / correction2) + profile.epsilon
     updated = decayed - step_size * state.exp_avg_weight / denom_weight
     updated_bias = bias - step_size * state.exp_avg_bias / denom_bias
-    return updated, float(updated_bias)
+    return numpy.asarray(updated, dtype=numpy.float32), float(numpy.float32(updated_bias))
 
 
 def fit_linear_probe(
@@ -168,12 +168,12 @@ def _fit_layer(
     validation_domains: Sequence[str] | None,
 ) -> LayerFit:
     standardizer = fit_standardizer(train, mode=preprocessing, domains=train_domains)
-    design = apply_standardizer(train, standardizer).astype(numpy.float64)
-    held_out = apply_standardizer(validation, standardizer).astype(numpy.float64)
+    design = apply_standardizer(train, standardizer)
+    held_out = apply_standardizer(validation, standardizer)
     init = initialization_seed(training_seed=training_seed, task_id=task_id, method_id=method_id, layer=layer)
     shuffle = shuffle_seed(training_seed=training_seed, task_id=task_id, method_id=method_id, layer=layer)
     weight_tuple, bias = initialize_logistic(seed=init, width=design.shape[1])
-    weight = numpy.asarray(weight_tuple, dtype=numpy.float64)
+    weight = numpy.asarray(weight_tuple, dtype=numpy.float32)
     state = AdamState.zeros(design.shape[1])
     generator = pcg64_generator(shuffle)
     checkpoints: list[EpochCheckpoint] = []
@@ -256,7 +256,7 @@ def _targets(values: Sequence[int], count: int) -> numpy.ndarray:
         if type(value) is not int or value not in (0, 1):
             raise ValueError("each target must be 0 or 1")
         parsed.append(value)
-    return numpy.asarray(parsed, dtype=numpy.float64)
+    return numpy.asarray(parsed, dtype=numpy.float32)
 
 
 def _layers(layers: Sequence[int], available: int) -> tuple[int, ...]:

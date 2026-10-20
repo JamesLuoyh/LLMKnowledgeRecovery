@@ -73,7 +73,7 @@ class LinearProbe:
         transformed = apply_standardizer(residuals, Standardizer(
             self.preprocessing, self.mean, self.scale, (),
         ))
-        logits = numpy.asarray(transformed, dtype=numpy.float64) @ numpy.asarray(self.weight) + self.bias
+        logits = numpy.asarray(transformed, dtype=numpy.float32) @ numpy.asarray(self.weight, dtype=numpy.float32) + numpy.float32(self.bias)
         return tuple(float(item) for item in sigmoid(logits))
 
 

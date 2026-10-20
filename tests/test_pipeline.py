@@ -186,6 +186,17 @@ def test_method_failures_leave_the_other_tasks_in_an_incomplete_summary(tmp_path
     assert by_name["knowledge_consistency/linear_clean_answer"] == "unavailable"
     assert by_name["knowledge_consistency/contextual_answer"] == "complete"
     assert "one-class" in str(raised.value) or "empty validation" in str(raised.value)
+    first = json.loads((storage / "runs" / "current.json").read_text(encoding="utf-8"))
+    first_manifest = storage / "runs" / first["bundle_id"] / first["attempt_id"] / "manifest.json"
+    assert first_manifest.is_file()
+
+    with pytest.raises(PipelineIncomplete):
+        train_stage(StageRequest(stage="train", config=str(config)))
+    second = json.loads((storage / "runs" / "current.json").read_text(encoding="utf-8"))
+    assert second["bundle_id"] == first["bundle_id"]
+    assert second["attempt_id"] != first["attempt_id"]
+    assert first_manifest.is_file()
+    assert (storage / "runs" / second["bundle_id"] / second["attempt_id"] / "manifest.json").is_file()
 
 
 def _write_views(storage, view_id: str) -> None:

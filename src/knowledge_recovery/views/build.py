@@ -34,12 +34,20 @@ class ScoredRow:
     order_id: str
     clean_canonical_label: str
     contextual_canonical_label: str
+    instance_id: str = ""
+    contextual_canonical_probabilities: tuple[float, float] = (0.5, 0.5)
 
     def __post_init__(self) -> None:
         if self.split not in ("train", "val", "test"):
             raise ValueError("split must be train, val, or test")
         if self.clean_canonical_label not in ("A", "B") or self.contextual_canonical_label not in ("A", "B"):
             raise ValueError("canonical labels must be A or B")
+        if self.instance_id == "":
+            object.__setattr__(self, "instance_id", self.variant_id)
+        probabilities = tuple(float(value) for value in self.contextual_canonical_probabilities)
+        if len(probabilities) != 2 or any(value < 0.0 or value > 1.0 for value in probabilities):
+            raise ValueError("contextual canonical probabilities must be an A/B pair")
+        object.__setattr__(self, "contextual_canonical_probabilities", probabilities)
 
 
 def build_task_views(
@@ -107,6 +115,8 @@ def _reference(row: ScoredRow, task_id: str) -> dict[str, object]:
         "row_key": row.row_key,
         "base_group_id": row.base_group_id,
         "variant_id": row.variant_id,
+        "instance_id": row.instance_id,
         "order_id": row.order_id,
         "target": target,
+        "canonical_ab": list(row.contextual_canonical_probabilities),
     }

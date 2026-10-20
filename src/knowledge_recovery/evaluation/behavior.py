@@ -141,10 +141,7 @@ def _group(rows: Sequence[BehaviorRow], clean_variant: str) -> dict[str, dict[tu
         orders[row.order_id] = row
     if not grouped:
         return {}
-    expected = {key for instances in grouped.values() for key in instances}
     for group_id, instances in grouped.items():
-        if set(instances) != expected:
-            raise ValueError(f"base group {group_id} does not carry every intervention instance")
         clean = [key for key in instances if key[0] == clean_variant]
         if len(clean) != 1:
             raise ValueError(f"base group {group_id} must have one {clean_variant} instance")
@@ -213,10 +210,12 @@ def _instance(
     scoring: str,
     clean_variant: str,
 ) -> InstanceDeviation:
+    covered = [question for question in both if key in question]
+    denominator = len(covered)
     changed_a: list[str] = []
     changed_b: list[str] = []
     valid_a = invalid_a = valid_b = invalid_b = 0
-    for question in both:
+    for question in covered:
         group_id = _clean_row(question, clean_variant, "correct_at_A").base_group_id
         kind_a = _change(question, key, "correct_at_A", scoring, clean_variant)
         kind_b = _change(question, key, "correct_at_B", scoring, clean_variant)
@@ -295,7 +294,7 @@ def _instance_keys(
 ) -> tuple[tuple[str, str], ...]:
     if not questions:
         return ()
-    return tuple(sorted(questions[0]))
+    return tuple(sorted({key for question in questions for key in question}))
 
 
 def _check_bounds(table: BehaviorTable) -> None:

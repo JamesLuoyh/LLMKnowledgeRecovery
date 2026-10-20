@@ -150,3 +150,22 @@ def test_distinct_invalid_tokens_are_invalid_transitions_and_inputs_are_checked(
         behavior_tables(rows, raw_retained=["missing"], canonical_retained=["q"])
     with pytest.raises(ValueError, match="missing an order"):
         behavior_tables(rows[:1], raw_retained=[], canonical_retained=[])
+
+
+def test_variable_instance_coverage_uses_each_instances_own_denominator():
+    rows = []
+    for group in ("q1", "q2"):
+        rows.extend(_pair(group, "train", "clean", "clean", (("A", "A", 1), ("B", "B", 2))))
+        rows.extend(_pair(group, "train", "context", "shared", (("A", "A", 1), ("B", "B", 2))))
+    rows.extend(_pair("q1", "train", "context", "q1-only", (("B", "B", 2), ("A", "A", 1))))
+
+    table = next(
+        item
+        for item in behavior_tables(rows, raw_retained=("q1", "q2"), canonical_retained=("q1", "q2"))
+        if item.name == "canonical_label__all_valid__train"
+    )
+    shared = _instance(table, "context", "shared")
+    q1_only = _instance(table, "context", "q1-only")
+    assert shared.correct_at_A.changed.denominator == 2
+    assert q1_only.correct_at_A.changed.denominator == 1
+    assert q1_only.changed_both_orders.denominator == 1

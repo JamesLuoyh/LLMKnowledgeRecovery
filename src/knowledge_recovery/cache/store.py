@@ -8,9 +8,11 @@ else reports the missing key and does not infer the row.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,7 @@ class ExtractionStore:
         self.shard_root = self.extraction_root / "shards"
         self.staging_root = self.root / "tmp" / "shards"
         self.index_path = self.extraction_root / INDEX_NAME
+        self.lock_path = self.extraction_root / ".store.lock"
         self.shard_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
 
@@ -108,7 +111,11 @@ class ExtractionStore:
         _atomic_bytes(directory / COMPLETE_NAME, checksum_bytes(payload).encode())
 
     def commit_index(self) -> None:
-        """Publish every sealed shard. Incomplete directories stay out of the index."""
+        """Publish every sealed shard under the global-index lock."""
+        with self._exclusive_lock():
+            self._commit_index_unlocked()
+
+    def _commit_index_unlocked(self) -> None:
         index = _read_index(self.index_path)
         for directory in sorted(self.shard_root.iterdir()):
             if not (directory / COMPLETE_NAME).is_file():
@@ -120,16 +127,39 @@ class ExtractionStore:
 
     def write_rows(self, rows: Sequence[Mapping[str, Any]]) -> tuple[RowReference, ...]:
         """Stage, seal, and index rows that are not already published."""
-        pending = [row for row in rows if self.row_status(str(row["row_key"])) == "absent"]
-        if pending:
-            staged = self.stage_rows(pending)
-            self.complete_shard(staged)
-            self.commit_index()
+        with self._exclusive_lock():
+            pending = [row for row in rows if self.row_status(str(row["row_key"])) == "absent"]
+            if pending:
+                staged = self.stage_rows(pending)
+                self.complete_shard(staged)
+                self._commit_index_unlocked()
         return self.lookup(
             [str(row["row_key"]) for row in rows],
             model_factory=_forbidden_model,
             extraction_command="kr extract --config cache-write",
         )
+
+    def write_collection_manifest(self, path: Path, payload: Mapping[str, Any]) -> None:
+        """Atomically publish the collection pointer under the store lock."""
+        expected = self.extraction_root / "collection.json"
+        if path != expected:
+            raise ValueError(f"collection manifest must be written to {expected}")
+        encoded = (
+            json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        with self._exclusive_lock():
+            _atomic_bytes(path, encoded)
+
+    @contextmanager
+    def _exclusive_lock(self):
+        """Serialize row reservation, shard publication, and index updates."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def row_status(self, row_key: str) -> str:
         """Distinguish a missing key from an unfinished or unpublished shard."""
