@@ -170,8 +170,6 @@ class AnalysisViewConfig:
     filter_splits: tuple[str, ...]
     min_correct_prob: float
     paired_orders: bool
-    probability_basis: str | None
-    decision_record: str | None
     train_variants: tuple[str, ...]
     eval_variants: tuple[str, ...]
     agreement_basis: str
@@ -228,7 +226,7 @@ def validate_before_expensive_work(
     *,
     repository_root: Path | None = None,
 ) -> None:
-    """Check the storage root, local assets, and decision record without creating them.
+    """Check the storage root and local assets without creating them.
 
     A missing root is an error. This function does not create directories and does
     not substitute the repository or the home directory.
@@ -259,26 +257,6 @@ def validate_before_expensive_work(
         raise MissingLocalAsset(kind="model", expected_location=model_path)
     if not Path(dataset_path).exists():
         raise MissingLocalAsset(kind="dataset", expected_location=dataset_path)
-    _check_decision_record(config.analysis_view.decision_record, resolved)
-
-
-def _check_decision_record(decision: str | None, root: Path) -> None:
-    if decision is None:
-        return
-    path = Path(decision)
-    if not path.is_absolute():
-        path = root / path
-    if not path.is_file():
-        raise ConfigurationError(
-            f"Decision record does not exist: {path}\n"
-            "The decision-record location is checked before any expensive work."
-        )
-    try:
-        path.resolve().relative_to(root)
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"Decision record {path} must be stored under the storage root {root}."
-        ) from exc
 
 
 def _extraction(raw: Any) -> ExtractionConfig:
@@ -510,19 +488,10 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
     chosen = _object(
         body["filter_correct"],
         "analysis_view.filter_correct",
-        ("variant", "splits", "min_correct_prob", "paired_orders", "probability_basis", "decision_record"),
+        ("variant", "splits", "min_correct_prob", "paired_orders"),
     )
-    basis = chosen["probability_basis"]
-    if basis is not None and basis not in ("raw", "canonical"):
-        raise ConfigurationError(
-            "analysis_view.filter_correct.probability_basis must be null, raw, or canonical. "
-            "It is never inferred from a retention rate."
-        )
     if chosen["paired_orders"] is not True:
         raise ConfigurationError("analysis_view.filter_correct.paired_orders must be true")
-    decision = chosen["decision_record"]
-    if decision is not None:
-        decision = _text(decision, "analysis_view.filter_correct.decision_record")
     analysis = _object(
         body["analysis"],
         "analysis_view.analysis",
@@ -549,8 +518,6 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         ),
         min_correct_prob=_probability(chosen["min_correct_prob"], "analysis_view.filter_correct.min_correct_prob"),
         paired_orders=True,
-        probability_basis=basis,
-        decision_record=decision,
         train_variants=_strings(analysis, "train_variants", "analysis_view.analysis"),
         eval_variants=_strings(analysis, "eval_variants", "analysis_view.analysis"),
         agreement_basis="canonical",

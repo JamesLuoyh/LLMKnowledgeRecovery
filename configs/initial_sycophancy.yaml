@@ -1,5 +1,5 @@
 # Initial sycophancy contract. Each object has schema_version 1.
-# probability_basis null is the decision gate; it is not inferred.
+# min_correct_prob is a strict lower bound on the greedy option's normalized probability.
 extraction:
   schema_version: 1
   storage:
@@ -68,8 +68,6 @@ analysis_view:
     splits: [train, val, test]
     min_correct_prob: 0.8
     paired_orders: true
-    probability_basis: null
-    decision_record: null
   analysis:
     train_variants: [clean, T-C, T-IC]
     eval_variants: [NT-C, NT-IC]
