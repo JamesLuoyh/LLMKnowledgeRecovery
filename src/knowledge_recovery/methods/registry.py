@@ -11,10 +11,13 @@ from typing import Any
 from knowledge_recovery.errors import KnowledgeRecoveryError
 from knowledge_recovery.methods.awareness import TrainingFrequency
 from knowledge_recovery.methods.consistency import ContextualAnswer
+from knowledge_recovery.probes.linear import LinearProbe
 
 REGISTRY: dict[tuple[str, str], type] = {
+    ("behavioral_awareness", "linear"): LinearProbe,
     ("behavioral_awareness", "training_frequency"): TrainingFrequency,
     ("knowledge_consistency", "contextual_answer"): ContextualAnswer,
+    ("knowledge_consistency", "linear"): LinearProbe,
 }
 
 
