@@ -23,7 +23,6 @@ CONFIG_STAGES = (
 )
 VIEW_STAGES = ("build-view", "train")
 RUN_STAGES = ("evaluate", "report")
-DECISION_STAGE = "record-filter-decision"
 
 StageHandler = Callable[["StageRequest"], None]
 # Later pull requests register stage implementations here.
@@ -36,8 +35,6 @@ class StageRequest:
 
     stage: str
     config: str | None = None
-    report: str | None = None
-    basis: str | None = None
     run: str | None = None
 
 
@@ -76,9 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     for stage in CONFIG_STAGES:
         add_config(stage)
-    decision = stages.add_parser(DECISION_STAGE)
-    decision.add_argument("--report", required=True)
-    decision.add_argument("--basis", required=True)
     for stage in VIEW_STAGES:
         add_config(stage)
     for stage in RUN_STAGES:
@@ -90,7 +84,5 @@ def _request(namespace: argparse.Namespace) -> StageRequest:
     return StageRequest(
         stage=namespace.stage,
         config=getattr(namespace, "config", None),
-        report=getattr(namespace, "report", None),
-        basis=getattr(namespace, "basis", None),
         run=getattr(namespace, "run", None),
     )
