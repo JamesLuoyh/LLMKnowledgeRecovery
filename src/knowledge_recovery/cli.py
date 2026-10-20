@@ -48,7 +48,7 @@ def main(
         request = _request(build_parser().parse_args(list(argv) if argv is not None else None))
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
-    handler = (STAGE_HANDLERS if handlers is None else handlers).get(request.stage)
+    handler = _handlers(handlers).get(request.stage)
     if handler is None:
         print(
             f"kr: stage {request.stage!r} is not registered.\n"
@@ -76,8 +76,24 @@ def build_parser() -> argparse.ArgumentParser:
     for stage in VIEW_STAGES:
         add_config(stage)
     for stage in RUN_STAGES:
-        stages.add_parser(stage).add_argument("--run", required=True)
+        run = stages.add_parser(stage)
+        run.add_argument("--run", required=True)
+        run.add_argument("--config")
     return parser
+
+
+def _handlers(handlers: Mapping[str, StageHandler] | None) -> Mapping[str, StageHandler]:
+    """Use an injected table, else the empty registry, else the stage graph.
+
+    The graph is imported by name so this module's source does not import
+    dataset, model, or fitting code. ``STAGE_HANDLERS`` stays empty.
+    """
+    if handlers is not None:
+        return handlers
+    if STAGE_HANDLERS:
+        return STAGE_HANDLERS
+    module = __import__("knowledge_recovery.pipeline", fromlist=["STAGE_HANDLERS"])
+    return module.STAGE_HANDLERS
 
 
 def _request(namespace: argparse.Namespace) -> StageRequest:

@@ -12,6 +12,7 @@ from typing import Any
 from knowledge_recovery.prompts.placement import resolve_placement
 from knowledge_recovery.records import BaseItem, InterventionInstance, freeze
 
+RENDERER_VERSION = "user-text-v1"
 ORDERS = (("correct_at_A", "A"), ("correct_at_B", "B"))
 
 
