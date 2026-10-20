@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from knowledge_recovery.cli import STAGE_HANDLERS, StageRequest, main
-from knowledge_recovery.errors import FilterPolicyDecisionRequired
+from knowledge_recovery.errors import MissingLocalAsset
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI_PATH = ROOT / "src" / "knowledge_recovery" / "cli.py"
@@ -60,30 +60,24 @@ def test_registered_handler_receives_unopened_config(tmp_path):
     assert not config.exists()
 
 
-def test_decision_and_run_identifiers_pass_through():
+def test_run_identifier_passes_through():
     seen: list[StageRequest] = []
-    assert main(
-        ["record-filter-decision", "--report", "report-7", "--basis", "maybe"],
-        handlers={"record-filter-decision": seen.append},
-    ) == 0
     assert main(
         ["evaluate", "--run", "run-7"],
         handlers={"evaluate": seen.append},
     ) == 0
-    assert seen[0] == StageRequest(
-        stage="record-filter-decision", report="report-7", basis="maybe"
-    )
-    assert seen[1] == StageRequest(stage="evaluate", run="run-7")
+    assert seen == [StageRequest(stage="evaluate", run="run-7")]
+    assert main(["record-filter-decision", "--report", "report-7", "--basis", "raw"]) != 0
 
 
-def test_filter_gate_prints_its_message_and_exits_nonzero(capsys):
+def test_domain_error_prints_its_message_and_exits_nonzero(capsys):
     def handler(_request: StageRequest) -> None:
-        raise FilterPolicyDecisionRequired(report_id="report-7")
+        raise MissingLocalAsset(kind="dataset", expected_location="/assets/dataset")
 
     code = main(["diagnose", "--config", "configs/x.yaml"], handlers={"diagnose": handler})
-    assert code == FilterPolicyDecisionRequired.exit_code
+    assert code == MissingLocalAsset.exit_code
     assert code != 0
-    assert "Both filtering reports have been saved." in capsys.readouterr().err
+    assert "Expected location: /assets/dataset" in capsys.readouterr().err
 
 
 def test_unregistered_and_unknown_stages_exit_nonzero(capsys):

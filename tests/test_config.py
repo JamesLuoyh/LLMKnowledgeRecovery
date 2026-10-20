@@ -57,7 +57,9 @@ def test_shipped_file_is_three_explicit_contracts():
         "sycophancy_T_IC",
         "sycophancy_NT_IC",
     ]
-    assert view.probability_basis is None and view.decision_record is None
+    assert view.min_correct_prob == 0.8
+    assert not hasattr(view, "probability_basis")
+    assert not hasattr(view, "decision_record")
     assert view.train_variants == ("clean", "T-C", "T-IC")
     assert view.eval_variants == ("NT-C", "NT-IC")
     assert view.split_seed == 42 and probe.training_seed == 42
@@ -95,19 +97,15 @@ def test_unknown_keys_and_schema_versions_are_rejected(tmp_path):
         _load(wrong, tmp_path)
 
 
-def test_probability_basis_null_is_kept_and_not_inferred(tmp_path):
-    assert _shipped().analysis_view.probability_basis is None
-    omitted = _document()
-    del omitted["analysis_view"]["filter_correct"]["probability_basis"]
-    with pytest.raises(ConfigurationError, match="probability_basis"):
-        _load(omitted, tmp_path)
+def test_a_probability_basis_is_not_a_configuration_field(tmp_path):
     inferred = _document()
-    inferred["analysis_view"]["filter_correct"]["probability_basis"] = "inferred"
-    with pytest.raises(ConfigurationError, match="never inferred"):
+    inferred["analysis_view"]["filter_correct"]["probability_basis"] = "canonical"
+    with pytest.raises(ConfigurationError, match="unknown keys: probability_basis"):
         _load(inferred, tmp_path)
-    explicit = _document()
-    explicit["analysis_view"]["filter_correct"]["probability_basis"] = "canonical"
-    assert _load(explicit, tmp_path).analysis_view.probability_basis == "canonical"
+    recorded = _document()
+    recorded["analysis_view"]["filter_correct"]["decision_record"] = "choice.json"
+    with pytest.raises(ConfigurationError, match="unknown keys: decision_record"):
+        _load(recorded, tmp_path)
 
 
 def test_precision_and_system_message_are_explicit(tmp_path):
@@ -204,7 +202,7 @@ def test_storage_root_cannot_be_the_repository_or_home(tmp_path):
         validate_before_expensive_work(home_config, repository_root=tmp_path)
 
 
-def test_assets_and_decision_record_are_checked_before_work(tmp_path):
+def test_assets_are_checked_before_work(tmp_path):
     root = tmp_path / "storage"
     root.mkdir()
     model = root / "model"
@@ -222,19 +220,3 @@ def test_assets_and_decision_record_are_checked_before_work(tmp_path):
     with pytest.raises(MissingLocalAsset, match="model"):
         validate_before_expensive_work(_load(absent_model, tmp_path), repository_root=ROOT)
     assert not (root / "missing-model").exists()
-    missing_decision = copy.deepcopy(document)
-    missing_decision["analysis_view"]["filter_correct"]["decision_record"] = "decisions/choice.json"
-    with pytest.raises(ConfigurationError, match="Decision record does not exist"):
-        validate_before_expensive_work(_load(missing_decision, tmp_path), repository_root=ROOT)
-    assert not (root / "decisions").exists()
-    outside = tmp_path / "choice.json"
-    outside.write_text("{}", encoding="utf-8")
-    external = copy.deepcopy(document)
-    external["analysis_view"]["filter_correct"]["decision_record"] = str(outside)
-    with pytest.raises(ConfigurationError, match="storage root"):
-        validate_before_expensive_work(_load(external, tmp_path), repository_root=ROOT)
-    choice = root / "choice.json"
-    choice.write_text("{}", encoding="utf-8")
-    recorded = copy.deepcopy(document)
-    recorded["analysis_view"]["filter_correct"]["decision_record"] = "choice.json"
-    validate_before_expensive_work(_load(recorded, tmp_path), repository_root=ROOT)
