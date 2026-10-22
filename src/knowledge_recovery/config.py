@@ -534,7 +534,8 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         min_correct_prob=_probability(chosen["min_correct_prob"], "analysis_view.filter_correct.min_correct_prob"),
         paired_orders=True,
         train_variants=_strings(analysis, "train_variants", "analysis_view.analysis"),
-        eval_variants=_strings(analysis, "eval_variants", "analysis_view.analysis"),
+        # An empty list skips the OOD evaluation view and its metrics.
+        eval_variants=_strings(analysis, "eval_variants", "analysis_view.analysis", allow_empty=True),
         agreement_basis="canonical",
         recovery_target="clean_canonical_argmax",
         variant_stats=variant_stats,
@@ -795,8 +796,11 @@ def _strings(
     label: str,
     *,
     expected: tuple[str, ...] | None = None,
+    allow_empty: bool = False,
 ) -> tuple[str, ...]:
     value = raw[key]
+    if type(value) is list and not value and allow_empty:
+        return ()
     if type(value) is not list or not value or any(type(item) is not str or item == "" for item in value):
         raise ConfigurationError(f"{label}.{key} must be a non-empty list of strings")
     if len(set(value)) != len(value):

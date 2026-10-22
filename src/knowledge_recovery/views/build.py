@@ -2,12 +2,14 @@
 
 Training and validation contain the configured training variants on their
 own splits. OOD variants appear only in the OOD evaluation view. Changing
-that assignment does not change the training view id.
+that assignment does not change the training view id. No OOD variants means
+no OOD evaluation view.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from knowledge_recovery.provenance import Artifact, view_id
@@ -59,7 +61,10 @@ def build_task_views(
     split_digest: str,
     filter_digest: str,
 ) -> dict[str, Artifact]:
-    """Build train, validation, ID evaluation, and OOD evaluation views for both tasks."""
+    """Build train, validation, ID evaluation, and OOD evaluation views for both tasks.
+
+    The OOD evaluation view is left out when ``eval_variants`` is empty.
+    """
     eligible_ids = tuple(eligible)
     views: dict[str, Artifact] = {}
     for task_id, class_order, target_version in TASKS:
@@ -69,6 +74,8 @@ def build_task_views(
             ("evaluation_id", "test", "id", train_variants),
             ("evaluation_ood", "test", "ood", eval_variants),
         )
+        if not eval_variants:
+            specs = specs[:-1]
         for name, split, domain, variants in specs:
             chosen = _select(rows, eligible_ids, split, variants)
             role = "evaluation" if name.startswith("evaluation") else name
@@ -89,6 +96,36 @@ def build_task_views(
                 filter_provenance=filter_digest,
             )
     return views
+
+
+def view_summary(views: Mapping[str, Artifact], *, skipped_ood: bool = False) -> str:
+    """A table of rows, groups, variant counts, and target counts for each view."""
+    lines = [f"Built {len(views)} views."]
+    if skipped_ood:
+        lines.append("No OOD evaluation view: analysis_view.analysis.eval_variants is empty.")
+    lines.append(f"{'view':<42} {'rows':>6} {'groups':>6}  {'variants':<62} targets")
+    for name, artifact in views.items():
+        references = artifact.record["row_references"]
+        variants = Counter(row["variant_id"] for row in references)
+        targets = Counter(int(row["target"]) for row in references)
+        lines.append(
+            f"{name:<42} {len(references):>6} {len(artifact.record['group_ids']):>6}  "
+            f"{_counts(variants) or '-':<62} {_counts(targets) or '-'}"
+        )
+    for task_id, _class_order, _version in TASKS:
+        held_out = views.get(f"{task_id}/evaluation_ood")
+        same = held_out is not None and _keys(held_out) == _keys(views[f"{task_id}/evaluation_id"])
+        if same:
+            lines.append(f"Note: {task_id} OOD evaluation has the same rows as ID evaluation.")
+    return "\n".join(lines)
+
+
+def _counts(counts: Counter) -> str:
+    return ", ".join(f"{key}: {counts[key]}" for key in sorted(counts))
+
+
+def _keys(artifact: Artifact) -> list[str]:
+    return [row["row_key"] for row in artifact.record["row_references"]]
 
 
 def _select(

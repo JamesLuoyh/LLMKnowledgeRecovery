@@ -66,7 +66,7 @@ from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
 from knowledge_recovery.training.fit import TRAINING_IMPLEMENTATION_VERSION, fit_linear_probe
 from knowledge_recovery.training.manifest import write_selection_manifest
 from knowledge_recovery.training.select import select_probe
-from knowledge_recovery.views.build import ScoredRow, build_task_views
+from knowledge_recovery.views.build import ScoredRow, build_task_views, view_summary
 from knowledge_recovery.views.filters import CleanOrder, apply_filter_gate, apply_variant_gate
 from knowledge_recovery.views.splits import freeze_grouped_split
 
@@ -490,6 +490,7 @@ def build_view_stage(request: StageRequest) -> None:
         _write_json(path, {"name": name, "view_id": artifact.digest, "sidecar": record})
         index[name] = {"view_id": artifact.digest, "path": path.name}
     _write_json(storage / "views" / "index.json", index)
+    print(view_summary(views, skipped_ood=not config.analysis_view.eval_variants))
 
 
 def train_stage(request: StageRequest) -> None:
@@ -709,6 +710,8 @@ def _evaluation_rows(storage: Path, views: Mapping[str, Mapping[str, Any]]) -> t
     result: list[EvaluationRow] = []
     view_ids: dict[str, str] = {}
     for suffix, domain in (("evaluation_id", "id"), ("evaluation_ood", "ood")):
+        if domain == "ood" and f"{AWARENESS_TASK_ID}/{suffix}" not in views:
+            continue
         awareness = views[f"{AWARENESS_TASK_ID}/{suffix}"]
         consistency = views[f"{CONSISTENCY_TASK_ID}/{suffix}"]
         view_ids[f"{AWARENESS_TASK_ID}/{suffix}"] = awareness["view_id"]

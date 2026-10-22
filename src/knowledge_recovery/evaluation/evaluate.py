@@ -84,7 +84,10 @@ def evaluate_saved(
     evaluation_view_id: str,
     ece_bins: int = DEFAULT_ECE_BINS,
 ) -> dict[str, Any]:
-    """Score ID and OOD rows from manifests that were written before this call."""
+    """Score ID and OOD rows from manifests that were written before this call.
+
+    OOD metrics are left out when there are no OOD rows.
+    """
     awareness = load_selection_manifest(awareness_manifest)
     consistency = load_selection_manifest(consistency_manifest)
     if awareness.task_id != AWARENESS_TASK_ID or consistency.task_id != CONSISTENCY_TASK_ID:
@@ -292,8 +295,15 @@ def _method_metrics(
     chosen = [item for item in predictions if item["task_id"] == task_id and item["method_id"] == method_id]
     return {
         "selected_layer": selected_layer,
-        "domains": {domain: _domain_metrics(chosen, task_id, domain, ece_bins) for domain in _DOMAINS},
+        "domains": {domain: _domain_metrics(chosen, task_id, domain, ece_bins) for domain in present_domains(chosen)},
     }
+
+
+def present_domains(items: Sequence[Any]) -> tuple[str, ...]:
+    """ID always, and OOD only when some item belongs to it."""
+    def domain_of(item: Any) -> str:
+        return item["domain"] if isinstance(item, Mapping) else item.domain
+    return tuple(domain for domain in _DOMAINS if domain == "id" or any(domain_of(item) == domain for item in items))
 
 
 def _domain_metrics(predictions: Sequence[Mapping[str, Any]], task_id: str, domain: str, ece_bins: int) -> dict[str, Any]:

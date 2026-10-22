@@ -1,6 +1,6 @@
 """Per-layer probe figures and the wandb log of those figures.
 
-Each metric gets one pooled figure, with ID and OOD side by side, and one
+Each metric gets one pooled figure, with ID and OOD (when present) side by side, and one
 figure per variant. Baselines are grey dotted horizontal lines. A solid
 vertical marker is the layer chosen on validation cross-entropy.
 """
@@ -33,11 +33,12 @@ _pyplot_module = None
 
 
 def pooled_figure(curves: TaskCurves, metric: str):
-    """ID and OOD panels for the rows of both domains pooled inside each panel."""
+    """One panel per domain present, ID then OOD, with that domain's rows pooled."""
     chosen = _metric(metric)
     pyplot = _pyplot()
-    figure, axes = pyplot.subplots(1, 2, figsize=(10, 4.2), sharey=True)
-    for axis, domain in zip(axes, ("id", "ood"), strict=True):
+    domains = [domain for domain in ("id", "ood") if domain in curves.domains]
+    figure, axes = pyplot.subplots(1, len(domains), figsize=(5 * len(domains), 4.2), sharey=True, squeeze=False)
+    for axis, domain in zip(axes[0], domains, strict=True):
         _draw(axis, curves.domains[domain], chosen, variant=None, selected_layer=curves.selected_layer)
         axis.set_title(domain.upper())
     figure.suptitle(f"{curves.task_id} {_METRIC_LABELS[chosen]}")
@@ -167,6 +168,8 @@ def _draw(
 def _variants(curves: TaskCurves) -> tuple[tuple[str, str], ...]:
     found: list[tuple[str, str]] = []
     for domain in ("id", "ood"):
+        if domain not in curves.domains:
+            continue
         layers = curves.domains[domain].layers
         if not layers:
             continue

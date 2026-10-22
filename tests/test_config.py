@@ -15,7 +15,7 @@ from knowledge_recovery.config import (
 from knowledge_recovery.errors import AnswerInstructionMismatch, MissingLocalAsset, UnsupportedPositionSelector
 
 ROOT = Path(__file__).resolve().parents[1]
-SHIPPED = ROOT / "configs" / "initial_sycophancy.yaml"
+SHIPPED = ROOT / "tests" / "fixtures" / "initial_sycophancy.yaml"
 
 
 def _document():
@@ -240,3 +240,16 @@ def test_variant_filter_flags_default_off_and_the_final_filter_needs_stats(tmp_p
     loose["analysis_view"]["filter_correct"]["variant_stats"] = "yes"
     with pytest.raises(ConfigurationError, match="variant_stats must be an explicit boolean"):
         _load(loose, tmp_path)
+
+
+def test_empty_eval_variants_mean_no_ood_view(tmp_path):
+    document = _document()
+    document["analysis_view"]["analysis"]["eval_variants"] = []
+    assert _load(document, tmp_path).analysis_view.eval_variants == ()
+    document["analysis_view"]["analysis"]["train_variants"] = []
+    with pytest.raises(ConfigurationError, match="train_variants must be a non-empty list"):
+        _load(document, tmp_path)
+
+
+def test_the_working_config_still_loads():
+    load_config(ROOT / "configs" / "initial_sycophancy.yaml")

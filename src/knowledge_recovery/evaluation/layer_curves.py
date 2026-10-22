@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy
 
-from knowledge_recovery.evaluation.evaluate import EvaluationRow
+from knowledge_recovery.evaluation.evaluate import EvaluationRow, present_domains
 from knowledge_recovery.evaluation.metrics import (
     DEFAULT_ECE_BINS,
     awareness_metrics,
@@ -32,7 +32,6 @@ from knowledge_recovery.training.manifest import SelectionManifest, load_selecti
 TRAINING_FREQUENCY_BASELINE = "training_frequency"
 VARIANT_AGREEMENT_BASELINE = "variant_agreement_rate"
 CONTEXTUAL_ANSWER_BASELINE = "contextual_answer"
-DOMAINS = ("id", "ood")
 
 
 @dataclass(frozen=True)
@@ -68,7 +67,10 @@ class DomainCurves:
 
 @dataclass(frozen=True)
 class TaskCurves:
-    """ID and OOD curves for one task. ``selected_layer`` is the manifest choice."""
+    """ID and OOD curves for one task. ``selected_layer`` is the manifest choice.
+
+    ``domains`` has no OOD entry when there were no OOD rows.
+    """
 
     task_id: str
     selected_layer: int
@@ -114,7 +116,7 @@ def score_layers(
             frequency=frequency,
             contextual=contextual,
         )
-        for domain in DOMAINS
+        for domain in present_domains(parsed)
     }
     return TaskCurves(task_id=manifest.task_id, selected_layer=manifest.selected_layer, domains=domains)
 

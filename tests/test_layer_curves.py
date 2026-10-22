@@ -102,6 +102,20 @@ def test_pooled_figure_has_two_panels_and_variant_figure_has_grey_baselines():
         layer_plots._pyplot().close(variant)
 
 
+def test_without_ood_rows_there_are_no_ood_curves_and_one_pooled_panel():
+    pytest.importorskip("matplotlib")
+    from knowledge_recovery.evaluation import layer_plots
+
+    rows = tuple(row for row in _rows() if row.domain == "id")
+    curves = score_layers(rows, _manifest(AWARENESS_TASK_ID), frequency=_frequency())
+    assert set(curves.domains) == {"id"}
+    pooled = layer_plots.pooled_figure(curves, "accuracy")
+    try:
+        assert [axis.get_title() for axis in pooled.axes] == ["ID"]
+    finally:
+        layer_plots._pyplot().close(pooled)
+
+
 def _grey(color: object) -> bool:
     if isinstance(color, str):
         return color in {"0.40", "0.4", "0.65", "0.55"}

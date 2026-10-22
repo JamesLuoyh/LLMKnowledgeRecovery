@@ -16,7 +16,7 @@ from knowledge_recovery.pipeline import (
     train_stage,
 )
 from knowledge_recovery.provenance import content_digest, run_id
-from knowledge_recovery.views.build import ScoredRow, build_task_views
+from knowledge_recovery.views.build import ScoredRow, build_task_views, view_summary
 
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -152,6 +152,39 @@ def test_ood_variants_do_not_change_the_training_view():
     assert first["behavioral_awareness/evaluation_ood"].digest != second["behavioral_awareness/evaluation_ood"].digest
     train_keys = [row["row_key"] for row in first["behavioral_awareness/train"].record["row_references"]]
     assert train_keys == ["a" * 64]
+
+
+def test_empty_ood_variants_leave_out_the_ood_view_and_the_summary_says_so():
+    rows = [
+        ScoredRow("a" * 64, "g", "train", "clean", "correct_at_A", "A", "A"),
+        ScoredRow("b" * 64, "g", "test", "clean", "correct_at_A", "A", "B"),
+    ]
+    views = build_task_views(
+        rows,
+        eligible=("g",),
+        train_variants=("clean",),
+        eval_variants=(),
+        split_digest=DIGEST_A,
+        filter_digest=DIGEST_B,
+    )
+    assert sorted(views) == [
+        f"{task}/{name}"
+        for task in ("behavioral_awareness", "knowledge_consistency")
+        for name in ("evaluation_id", "train", "validation")
+    ]
+    summary = view_summary(views, skipped_ood=True)
+    assert "Built 6 views." in summary
+    assert "eval_variants is empty" in summary
+    assert "behavioral_awareness/evaluation_id" in summary and "clean: 1" in summary
+    same = build_task_views(
+        rows,
+        eligible=("g",),
+        train_variants=("clean",),
+        eval_variants=("clean",),
+        split_digest=DIGEST_A,
+        filter_digest=DIGEST_B,
+    )
+    assert "OOD evaluation has the same rows as ID evaluation" in view_summary(same)
 
 
 def test_training_requires_the_filter_report(tmp_path):

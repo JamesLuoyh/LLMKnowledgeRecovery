@@ -66,7 +66,7 @@ def test_placeholders_bind_answer_text_not_option_letters():
 
 
 def test_initial_variants_materialize_one_order_independent_instance(tmp_path):
-    extraction = load_config(ROOT / "configs" / "initial_sycophancy.yaml").extraction
+    extraction = load_config(ROOT / "tests" / "fixtures" / "initial_sycophancy.yaml").extraction
     specs = specs_from_config(extraction)
     assert [spec.variant_id for spec in specs] == ["clean", "T-C", "NT-C", "T-IC", "NT-IC"]
     assert specs[0].provider_name == "identity"
