@@ -90,7 +90,12 @@ def run_extraction(
     model = model_factory()
     freeze_model(model)
     absent = set(missing)
-    pending = [row for row in rows if row["row_key"] in absent]
+    # Similar lengths share a batch, so little of each forward is padding. A batch
+    # that halves after an out-of-memory error then only meets longer prompts.
+    pending = sorted(
+        (row for row in rows if row["row_key"] in absent),
+        key=lambda row: len(row.get("input_ids", ())),
+    )
     batch_sizes = _compute_missing(
         pending,
         store=store,

@@ -18,7 +18,12 @@ from typing import Any
 
 import numpy
 
-from knowledge_recovery.answers.canonical import CanonicalTokens, score_binary_answers
+from knowledge_recovery.answers.canonical import (
+    CanonicalTokens,
+    score_binary_answers,
+    score_binary_summary,
+    summarize_binary_logits,
+)
 from knowledge_recovery.cache.store import ExtractionStore
 from knowledge_recovery.cli import StageRequest
 from knowledge_recovery.config import ExperimentConfig, load_config, validate_before_expensive_work
@@ -95,6 +100,8 @@ STAGE_ORDER = (
     "evaluate",
     "report",
 )
+# First attempted extraction batch. An out-of-memory error halves it; it is not in the row key.
+EXTRACTION_BATCH_SIZE = 32
 METHOD_BINDINGS = (
     ("behavioral_awareness", "linear_agreement", "linear"),
     ("behavioral_awareness", "training_frequency", "training_frequency"),
@@ -338,6 +345,7 @@ def extract_stage(request: StageRequest) -> None:
             selected_position=row["selected_position"],
             execution_precision=config.extraction.precision,
             attention_backend=str(runtime["attention_backend"]),
+            logits_scope=config.extraction.logits_scope,
             numeric_runtime_signature=runtime,
             reporting=_reporting(config),
         )
@@ -349,12 +357,19 @@ def extract_stage(request: StageRequest) -> None:
     def factory() -> object:
         return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
 
+    canonical = CanonicalTokens(A=int(audit.token_ids["A"]), B=int(audit.token_ids["B"]))
+
     def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
         if model_config.get("logit_rule") == "integration_subset_v1":
             from knowledge_recovery.integration import subset_forward
 
-            return subset_forward(model, rows, batch_size=batch_size, precision=precision)
-        return forward_padded(model, rows, batch_size=batch_size, precision=precision)
+            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
+        else:
+            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
+        if config.extraction.logits_scope == "full_vocabulary":
+            return produced
+        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
+        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
 
     if missing:
         result = run_extraction(
@@ -362,7 +377,7 @@ def extract_stage(request: StageRequest) -> None:
             store=store,
             model_factory=factory,
             forward_batch=forward,
-            initial_batch_size=4,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
             execution_backend=str(model_config.get("model_type") or "local"),
         )
@@ -372,7 +387,7 @@ def extract_stage(request: StageRequest) -> None:
             store=store,
             model_factory=factory,
             forward_batch=forward,
-            initial_batch_size=4,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
             probe_only=True,
         )
@@ -387,6 +402,7 @@ def extract_stage(request: StageRequest) -> None:
             "execution_precision": result.precision,
             "residual_storage_dtype": "bf16",
             "logits_storage_dtype": "float32",
+            "logits_scope": config.extraction.logits_scope,
             "model_mode": "eval",
             "gradients_enabled": False,
             "dropout": False,
@@ -436,10 +452,16 @@ def diagnose_stage(request: StageRequest) -> None:
         A=int(collection["canonical_token_ids"]["A"]),
         B=int(collection["canonical_token_ids"]["B"]),
     )
+    # Collections written before logits_scope was recorded hold full-vocabulary logits.
+    scorer = (
+        score_binary_summary
+        if collection["numeric"].get("logits_scope", "full_vocabulary") == "ab_summary"
+        else score_binary_answers
+    )
     scored = []
     for row in rows:
         logits = store.read_logits_row(references[row["row_key"]])
-        scores = score_binary_answers([float(value) for value in logits.tolist()], tokens)
+        scores = scorer([float(value) for value in logits.tolist()], tokens)
         raw_label = None
         if scores.unrestricted_greedy_token_id == tokens.A:
             raw_label = "A"
@@ -1087,6 +1109,8 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
         },
         "interventions": [_plain(vars(item)) for item in extraction.interventions],
         "prepared_identity": prepared_identity,
+        # Absent for full_vocabulary so earlier collections keep their signature.
+        **({"logits_scope": extraction.logits_scope} if extraction.logits_scope != "full_vocabulary" else {}),
     })
 
 

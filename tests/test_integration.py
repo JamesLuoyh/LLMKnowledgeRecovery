@@ -164,3 +164,42 @@ def test_diagnose_writes_variant_counts_and_can_apply_the_final_filter(tmp_path)
     assert not (directory / "variant_filter_report.json").exists()
     scored = json.loads((storage / "analyses" / "scored.json").read_text(encoding="utf-8"))
     assert scored["variant_filter_digest"] is None
+
+
+def test_the_ab_summary_scope_reaches_the_same_filter(tmp_path, monkeypatch):
+    import yaml
+
+    from knowledge_recovery import integration
+    from knowledge_recovery.cache.store import ExtractionStore
+
+    full = run_labeled_subset(tmp_path / "full")
+    original = integration._write_config
+
+    def compact(path, **kwargs):
+        original(path, **kwargs)
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document["extraction"]["internals"]["logits_scope"] = "ab_summary"
+        path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    monkeypatch.setattr(integration, "_write_config", compact)
+    summary = run_labeled_subset(tmp_path / "summary")
+    collection = json.loads((summary["storage"] / "extractions" / "collection.json").read_text(encoding="utf-8"))
+    assert collection["numeric"]["logits_scope"] == "ab_summary"
+    store = ExtractionStore(summary["storage"])
+    reference = store.lookup([collection["rows"][0]["row_key"]], model_factory=None, extraction_command="kr extract")[0]
+    assert store.read_logits_row(reference).shape == (4,)
+    assert summary["eligible_base_group_ids"] == [summary["pass_group"]]
+    assert (
+        summary["report"]["record"]["population_counts"]
+        == full["report"]["record"]["population_counts"]
+    )
+
+    def labels(result):
+        scored = json.loads((result["storage"] / "analyses" / "scored.json").read_text(encoding="utf-8"))
+        return sorted(
+            (row["variant_id"], row["order_id"], row["contextual_canonical_label"],
+             tuple(row["contextual_canonical_probabilities"]))
+            for row in scored["rows"]
+        )
+
+    assert labels(summary) == labels(full)
