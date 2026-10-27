@@ -330,13 +330,6 @@ def load_frozen_model(path: Path | str, *, precision: str) -> Any:
     )
 
 
-def load_qwen(path: Path | str, *, precision: str) -> Any:
-    """Load local Qwen weights. Callers pass an explicit directory."""
-    root = Path(path)
-    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
-    return _load_qwen_weights(root, precision=precision, config=config)
-
-
 class QwenAdapter:
     """Torch module exposed under the documented hook names."""
 

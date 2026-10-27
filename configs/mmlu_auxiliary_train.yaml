@@ -54,9 +54,6 @@ extraction:
     save_final_normalized_state: true
     residual_storage_dtype: bf16
     logits_storage_dtype: float32
-    # ab_summary stores logit_A, logit_B, the vocabulary log-normalizer, and the greedy id
-    # (16 bytes per row instead of ~600KB). Diagnose and the filters need nothing else.
-    logits_scope: ab_summary
 
 analysis_view:
   schema_version: 1

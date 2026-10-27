@@ -22,17 +22,12 @@ def test_greedy_token_change_keeps_agreement_and_the_clean_target():
     contextual_greedy = 44
     assert clean_greedy != contextual_greedy
     assert "unrestricted_greedy_token" not in inspect.signature(awareness_label).parameters
-    assert "probability_basis" not in inspect.signature(awareness_label).parameters
-    assert "probability_basis" not in inspect.signature(consistency_target).parameters
-    for _basis in ("raw", "canonical"):
-        assert awareness_label(clean_canonical, contextual_canonical) == "agree"
-        assert AwarenessTask().target_index(clean_canonical, contextual_canonical) == 1
-        assert consistency_target(clean_canonical) == "A"
-        assert ConsistencyTask().target_index(clean_canonical) == 0
+    assert awareness_label(clean_canonical, contextual_canonical) == "agree"
+    assert AwarenessTask().target_index(clean_canonical, contextual_canonical) == 1
+    assert consistency_target(clean_canonical) == "A"
+    assert ConsistencyTask().target_index(clean_canonical) == 0
     with pytest.raises(TypeError):
         AwarenessTask().target("A", "A", unrestricted_greedy_token=contextual_greedy)
-    with pytest.raises(TypeError):
-        consistency_target("A", probability_basis="raw")
     assert awareness_label("A", "B") == "disagree"
     assert consistency_target("B") == "B"
     assert type(consistency_target("A")) is str

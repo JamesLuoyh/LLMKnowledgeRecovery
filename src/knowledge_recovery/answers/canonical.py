@@ -1,15 +1,17 @@
 """Raw, conditional, and greedy scores for one binary A/B continuation.
 
-Log-softmax and the two-token log-sum-exp run in float32. The result keeps
-only the A and B probabilities: the full-vocabulary probability vector is not
-materialized. Token ids are continuation ids supplied by the audit. This
-module does not retokenize a prompt with an answer appended to it.
+Extraction reduces each row's next-token logits to four float32 values
+(``AB_SUMMARY_FIELDS``): the A and B logits, the vocabulary log-normalizer,
+and the greedy token id. ``score_binary_summary`` scores one such row. The
+full-vocabulary probability vector is never stored. Token ids are
+continuation ids supplied by the audit. This module does not retokenize a
+prompt with an answer appended to it.
 
-The ``ab_summary`` logits scope stores four float32 values per row instead of
-the vocabulary (``AB_SUMMARY_FIELDS``). ``score_binary_summary`` reads them and
-returns the same fields. Its log-normalizer is a vectorized float32 reduction,
-so raw probabilities can differ from the full-vocabulary scorer in the last
-float32 bits. Canonical probabilities and both greedy choices are unchanged.
+Raw probabilities are the full-vocabulary softmax values at the A and B ids.
+Canonical probabilities are the softmax of the two canonical logits, so they
+are conditional on the continuation being A or B. Their total raw mass is
+``exp(logsumexp(A, B) - log_z)``. An exact tie among canonical logits selects
+A. An exact tie over the vocabulary selects the smallest token id.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import numpy
 from knowledge_recovery.records import AnswerScores
 
 SCORING_VERSION = "binary-ab-float32-v1"
-# Stored per row under logits_scope ab_summary, in this order.
+# Stored per row, in this order.
 AB_SUMMARY_FIELDS = ("logit_A", "logit_B", "log_z", "greedy_token_id")
 # Token ids are stored as float32, which is exact below 2**24.
 _MAX_SUMMARY_VOCABULARY = 2 ** 24
@@ -46,42 +48,10 @@ class CanonicalTokens:
             raise ValueError("canonical token ids for A and B must be distinct")
 
 
-def score_binary_answers(logits: Sequence[float], tokens: CanonicalTokens) -> AnswerScores:
-    """Score one next-token distribution under the audited A/B token ids.
-
-    Raw probabilities are the full-vocabulary softmax values at those ids.
-    Canonical probabilities are the softmax of the two canonical logits, so
-    they are conditional on the continuation being A or B. Their total raw
-    mass is ``exp(logsumexp(A, B) - logsumexp(vocabulary))``. An exact tie
-    among canonical logits selects A. An exact tie over the vocabulary
-    selects the smallest token id.
-    """
-    if not isinstance(tokens, CanonicalTokens):
-        raise TypeError("tokens must be CanonicalTokens")
-    values = _float32_logits(logits)
-    _check_bounds(tokens, len(values))
-    full_log_z = _logsumexp(values)
-    canonical_logits = (values[tokens.A], values[tokens.B])
-    canonical_log_z = _logsumexp(canonical_logits)
-    raw = tuple(_probability(logit - full_log_z) for logit in canonical_logits)
-    canonical = tuple(_probability(logit - canonical_log_z) for logit in canonical_logits)
-    mass = _probability(canonical_log_z - full_log_z)
-    greedy = _smallest_argmax(values)
-    return AnswerScores(
-        raw_ab_probabilities=raw,
-        canonical_ab_probabilities=canonical,
-        canonical_label_mass=mass,
-        unrestricted_greedy_token_id=greedy,
-        canonical_greedy_label="B" if canonical_logits[1] > canonical_logits[0] else "A",
-        invalid_label=greedy not in (tokens.A, tokens.B),
-        scoring_version=SCORING_VERSION,
-    )
-
-
 def summarize_binary_logits(logits: numpy.ndarray, tokens: CanonicalTokens) -> numpy.ndarray:
     """Reduce ``[rows, vocab]`` logits to ``[rows, 4]`` in ``AB_SUMMARY_FIELDS`` order.
 
-    The greedy token is the smallest id among exact ties, as in the full scorer.
+    The greedy token is the smallest id among exact ties.
     """
     if not isinstance(tokens, CanonicalTokens):
         raise TypeError("tokens must be CanonicalTokens")
@@ -103,12 +73,12 @@ def summarize_binary_logits(logits: numpy.ndarray, tokens: CanonicalTokens) -> n
 
 
 def score_binary_summary(summary: Sequence[float], tokens: CanonicalTokens) -> AnswerScores:
-    """``score_binary_answers`` for one row stored under logits_scope ab_summary."""
+    """Score one stored summary row under the audited A/B token ids."""
     if not isinstance(tokens, CanonicalTokens):
         raise TypeError("tokens must be CanonicalTokens")
     values = _float32_logits(summary)
     if len(values) != len(AB_SUMMARY_FIELDS):
-        raise ValueError(f"an ab_summary row holds {', '.join(AB_SUMMARY_FIELDS)}")
+        raise ValueError(f"a summary row holds {', '.join(AB_SUMMARY_FIELDS)}")
     logit_a, logit_b, full_log_z, greedy_value = values
     if greedy_value < 0 or greedy_value != int(greedy_value):
         raise ValueError("the stored greedy token id is not a token id")
@@ -129,8 +99,6 @@ def score_binary_summary(summary: Sequence[float], tokens: CanonicalTokens) -> A
 def _float32_logits(logits: Sequence[float]) -> tuple[float, ...]:
     if isinstance(logits, (str, bytes)) or not isinstance(logits, Sequence):
         raise TypeError("logits must be a sequence of real numbers")
-    if len(logits) == 0:
-        raise ValueError("logits must contain one value per vocabulary token")
     return tuple(_float32_logit(item) for item in logits)
 
 
@@ -172,13 +140,3 @@ def _probability(log_probability: float) -> float:
 
 def _round_float32(value: float) -> float:
     return array.array("f", [value])[0]
-
-
-def _smallest_argmax(values: Sequence[float]) -> int:
-    chosen = 0
-    best = values[0]
-    for index, value in enumerate(values):
-        if value > best:
-            chosen = index
-            best = value
-    return chosen

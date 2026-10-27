@@ -329,25 +329,6 @@ def test_a_selected_forward_computes_logits_at_the_selected_token_only():
     assert numpy.array_equal(selected.residuals, full.residuals)
 
 
-def test_the_logits_scope_enters_the_row_key():
-    from knowledge_recovery.extraction.identity import build_row_key
-
-    common = {
-        "model_signature": _key("model"),
-        "input_ids": [1, 2, 3],
-        "attention_mask": [1, 1, 1],
-        "prompt_contract_digest": _key("contract"),
-        "selected_position": 2,
-        "execution_precision": "bf16",
-        "attention_backend": "sdpa",
-        "numeric_runtime_signature": {"backend": "integration_mock", "execution_precision": "bf16"},
-    }
-    full = build_row_key(**common, logits_scope="full_vocabulary")
-    assert build_row_key(**common, logits_scope="ab_summary") != full
-    with pytest.raises(ValueError, match="logits_scope must be one of"):
-        build_row_key(**common, logits_scope="top_k")
-
-
 def test_library_versions_and_gpu_model_stay_out_of_the_row_key():
     from knowledge_recovery.extraction.identity import build_row_key
 
@@ -370,7 +351,6 @@ def test_library_versions_and_gpu_model_stay_out_of_the_row_key():
         "selected_position": 2,
         "execution_precision": "bf16",
         "attention_backend": "sdpa",
-        "logits_scope": "ab_summary",
     }
     key = build_row_key(**common, numeric_runtime_signature=runtime)
     upgraded = {

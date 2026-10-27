@@ -8,7 +8,6 @@ from knowledge_recovery.records import (
     SCHEMA_VERSION,
     AnswerScores,
     BaseItem,
-    DecisionRecord,
     EvaluationManifest,
     ExecutionProvenance,
     ExtractionRecord,
@@ -90,27 +89,6 @@ def test_base_item_rejects_empty_or_equal_answers():
         _item(source_row_ids=[])
     spaced = _item(correct_answer=" yes", incorrect_answer="yes")
     assert spaced.correct_answer == " yes"
-
-
-def test_decision_basis_is_explicit_and_the_filter_report_does_not_choose_one():
-    decision = DecisionRecord(
-        probability_basis="canonical",
-        filter_report_digest=DIGEST,
-        scope={"dataset": "sycophancy"},
-        timestamp="2026-01-01T00:00:00Z",
-        user_instruction="use canonical",
-    )
-    assert decision.probability_basis == "canonical"
-    with pytest.raises(ValueError, match="probability_basis"):
-        DecisionRecord(
-            probability_basis="inferred",
-            filter_report_digest=DIGEST,
-            scope={},
-            timestamp="2026-01-01T00:00:00Z",
-            user_instruction="pick the larger retention",
-        )
-    assert "probability_basis" not in {item.name for item in fields(FilterReport)}
-    assert "probability_basis" in {item.name for item in fields(DecisionRecord)}
 
 
 def test_execution_facts_have_a_record_outside_the_extraction_row():

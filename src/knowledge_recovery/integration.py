@@ -96,7 +96,6 @@ def run_labeled_subset(directory: Path | str, *, model_path: str | None = None) 
         "pass_group": base_group_id(PASS_QUESTION),
         "fail_group": base_group_id(FAIL_QUESTION),
         "report": report,
-        "stops_for_probability_basis": (storage / "decisions").exists(),
     }
 
 

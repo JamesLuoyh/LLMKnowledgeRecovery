@@ -17,7 +17,6 @@ TOKEN_AUDIT_FIELDS = (
     "answer_boundary",
     "canonical_strings",
 )
-PROBABILITY_BASES = ("raw", "canonical")
 ASSET_KINDS = ("model", "tokenizer", "dataset")
 CACHE_MISMATCHES = ("schema", "identity", "tensor_shape", "checksum")
 ANSWER_REQUEST_KINDS = ("direct_answer", "incompatible_label_set")

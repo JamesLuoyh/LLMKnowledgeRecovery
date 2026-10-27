@@ -8,8 +8,6 @@ from dataclasses import MISSING, dataclass, fields
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from knowledge_recovery.errors import PROBABILITY_BASES
-
 SCHEMA_VERSION = 1
 VIEW_ROLES = ("train", "validation", "evaluation")
 # These names are execution or analysis settings. They are recorded on their
@@ -33,7 +31,6 @@ EXTRACTION_EXCLUDED_KEYS = frozenset({
     "min_correct_prob",
     "variant_stats",
     "require_confident_on_every_variant",
-    "probability_basis",
     "ood_variants",
     "test_variants",
     "loss",
@@ -688,26 +685,6 @@ class FilterReport(Record):
             "canonical_only_diagnostics",
         ):
             _mapping(getattr(self, label), label)
-
-
-@record("decision_record")
-class DecisionRecord(Record):
-    """Explicit probability-basis choice. It is never inferred from a retention rate."""
-
-    probability_basis: str
-    filter_report_digest: str
-    scope: Any
-    timestamp: str
-    user_instruction: str
-
-    def validate(self) -> None:
-        if self.probability_basis not in PROBABILITY_BASES:
-            raise ValueError("probability_basis must be raw or canonical")
-        _digest(self.filter_report_digest, "filter_report_digest")
-        if self.scope is None:
-            raise ValueError("scope is required")
-        _text(self.timestamp, "timestamp")
-        _text(self.user_instruction, "user_instruction")
 
 
 @record("task_spec")

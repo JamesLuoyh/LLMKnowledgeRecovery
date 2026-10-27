@@ -277,7 +277,7 @@ class ExtractionStore:
         return numpy.stack(layers, axis=0) if len(set(widths)) == 1 else numpy.array(layers, dtype=object)
 
     def read_logits_row(self, reference: RowReference) -> numpy.ndarray:
-        """Memory-map one stored full-vocabulary logit vector."""
+        """Memory-map one stored logit summary (``AB_SUMMARY_FIELDS`` order)."""
         directory = self.shard_root / reference.shard_id
         manifest = _sealed_manifest(directory)
         shape = tuple(manifest["logits_shape"])

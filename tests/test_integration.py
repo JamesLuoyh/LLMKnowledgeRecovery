@@ -1,19 +1,15 @@
 import json
 
 from knowledge_recovery.integration import FAIL_QUESTION, PASS_QUESTION, SUBSET_LABEL, run_labeled_subset
-from knowledge_recovery.models.qwen import load_qwen
 
 
-def test_labeled_subset_reaches_the_filter_without_a_basis_choice(tmp_path, monkeypatch):
+def test_labeled_subset_reaches_the_filter_without_loading_qwen_weights(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("Qwen weights were loaded")
 
-    monkeypatch.setattr("knowledge_recovery.models.qwen.load_qwen", boom)
+    monkeypatch.setattr("knowledge_recovery.models.qwen._load_qwen_weights", boom)
     result = run_labeled_subset(tmp_path)
     assert result["model_path"]
-    assert load_qwen is not None
-    assert result["stops_for_probability_basis"] is False
-    assert not (result["storage"] / "decisions").exists()
     assert result["eligible_base_group_ids"] == [result["pass_group"]]
     assert result["fail_group"] not in result["eligible_base_group_ids"]
     overall = result["report"]["record"]["population_counts"]["overall"]
@@ -28,11 +24,9 @@ def test_labeled_subset_reaches_the_filter_without_a_basis_choice(tmp_path, monk
     assert overall["correct_at_B"]["after_greedy_is_option"] == 1
     text = (result["storage"] / "analyses" / "filter" / "filter_report.txt").read_text(encoding="utf-8")
     assert "normalized" in text
-    assert "raw-versus-canonical" not in text
     subset = json.loads((result["storage"] / "analyses" / "subset.json").read_text(encoding="utf-8"))
-    assert subset == {"stops_for_probability_basis": False, "subset_label": SUBSET_LABEL}
+    assert subset == {"subset_label": SUBSET_LABEL}
     behavior = json.loads((result["storage"] / "analyses" / "behavior.json").read_text(encoding="utf-8"))
-    assert behavior["probability_basis"] is None
     clean = [
         instance
         for table in behavior["tables"]
@@ -54,7 +48,7 @@ def test_labeled_subset_reaches_the_filter_without_a_basis_choice(tmp_path, monk
 
 
 def test_a_second_extract_does_not_need_the_model_files(tmp_path, monkeypatch):
-    result = run_labeled_subset(tmp_path)
+    run_labeled_subset(tmp_path)
     calls = []
 
     def boom(*_args, **_kwargs):
@@ -166,40 +160,12 @@ def test_diagnose_writes_variant_counts_and_can_apply_the_final_filter(tmp_path)
     assert scored["variant_filter_digest"] is None
 
 
-def test_the_ab_summary_scope_reaches_the_same_filter(tmp_path, monkeypatch):
-    import yaml
-
-    from knowledge_recovery import integration
+def test_extraction_stores_a_four_value_logit_summary(tmp_path):
+    from knowledge_recovery.answers import AB_SUMMARY_FIELDS
     from knowledge_recovery.cache.store import ExtractionStore
 
-    full = run_labeled_subset(tmp_path / "full")
-    original = integration._write_config
-
-    def compact(path, **kwargs):
-        original(path, **kwargs)
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        document["extraction"]["internals"]["logits_scope"] = "ab_summary"
-        path.write_text(yaml.safe_dump(document), encoding="utf-8")
-
-    monkeypatch.setattr(integration, "_write_config", compact)
-    summary = run_labeled_subset(tmp_path / "summary")
-    collection = json.loads((summary["storage"] / "extractions" / "collection.json").read_text(encoding="utf-8"))
-    assert collection["numeric"]["logits_scope"] == "ab_summary"
-    store = ExtractionStore(summary["storage"])
+    result = run_labeled_subset(tmp_path)
+    collection = json.loads((result["storage"] / "extractions" / "collection.json").read_text(encoding="utf-8"))
+    store = ExtractionStore(result["storage"])
     reference = store.lookup([collection["rows"][0]["row_key"]], model_factory=None, extraction_command="kr extract")[0]
-    assert store.read_logits_row(reference).shape == (4,)
-    assert summary["eligible_base_group_ids"] == [summary["pass_group"]]
-    assert (
-        summary["report"]["record"]["population_counts"]
-        == full["report"]["record"]["population_counts"]
-    )
-
-    def labels(result):
-        scored = json.loads((result["storage"] / "analyses" / "scored.json").read_text(encoding="utf-8"))
-        return sorted(
-            (row["variant_id"], row["order_id"], row["contextual_canonical_label"],
-             tuple(row["contextual_canonical_probabilities"]))
-            for row in scored["rows"]
-        )
-
-    assert labels(summary) == labels(full)
+    assert store.read_logits_row(reference).shape == (len(AB_SUMMARY_FIELDS),)

@@ -20,7 +20,6 @@ import numpy
 
 from knowledge_recovery.answers.canonical import (
     CanonicalTokens,
-    score_binary_answers,
     score_binary_summary,
     summarize_binary_logits,
 )
@@ -345,7 +344,6 @@ def extract_stage(request: StageRequest) -> None:
             selected_position=row["selected_position"],
             execution_precision=config.extraction.precision,
             attention_backend=str(runtime["attention_backend"]),
-            logits_scope=config.extraction.logits_scope,
             numeric_runtime_signature=runtime,
             reporting=_reporting(config),
         )
@@ -366,8 +364,6 @@ def extract_stage(request: StageRequest) -> None:
             produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
         else:
             produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
-        if config.extraction.logits_scope == "full_vocabulary":
-            return produced
         summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
         return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
 
@@ -401,7 +397,6 @@ def extract_stage(request: StageRequest) -> None:
             "execution_precision": result.precision,
             "residual_storage_dtype": "bf16",
             "logits_storage_dtype": "float32",
-            "logits_scope": config.extraction.logits_scope,
             "model_mode": "eval",
             "gradients_enabled": False,
             "dropout": False,
@@ -451,15 +446,10 @@ def diagnose_stage(request: StageRequest) -> None:
         A=int(collection["canonical_token_ids"]["A"]),
         B=int(collection["canonical_token_ids"]["B"]),
     )
-    scorer = (
-        score_binary_summary
-        if collection["numeric"]["logits_scope"] == "ab_summary"
-        else score_binary_answers
-    )
     scored = []
     for row in rows:
         logits = store.read_logits_row(references[row["row_key"]])
-        scores = scorer([float(value) for value in logits.tolist()], tokens)
+        scores = score_binary_summary([float(value) for value in logits.tolist()], tokens)
         raw_label = None
         if scores.unrestricted_greedy_token_id == tokens.A:
             raw_label = "A"
@@ -557,7 +547,6 @@ def diagnose_stage(request: StageRequest) -> None:
     )
     _write_json(storage / "analyses" / "behavior.json", {
         "population_rule": "fixed_four_step_eligible",
-        "probability_basis": None,
         **behavior_document(tables),
     })
     _write_json(storage / "analyses" / "scored.json", {
@@ -581,10 +570,7 @@ def diagnose_stage(request: StageRequest) -> None:
         ],
     })
     if collection.get("subset_label"):
-        _write_json(storage / "analyses" / "subset.json", {
-            "subset_label": collection["subset_label"],
-            "stops_for_probability_basis": False,
-        })
+        _write_json(storage / "analyses" / "subset.json", {"subset_label": collection["subset_label"]})
 
 
 def build_view_stage(request: StageRequest) -> None:
@@ -1101,7 +1087,6 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
         },
         "interventions": [_plain(non_default_fields(item)) for item in extraction.interventions],
         "prepared_identity": prepared_identity,
-        "logits_scope": extraction.logits_scope,
     })
 
 

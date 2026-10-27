@@ -112,7 +112,6 @@ internals:
   save_final_normalized_state: true
   residual_storage_dtype: bf16
   logits_storage_dtype: float32
-  logits_scope: full_vocabulary
 split:
   train_fraction: 0.6
   val_fraction: 0.2
@@ -242,9 +241,8 @@ One specification may produce different text for each question and multiple inst
 \item[ExtractionRecord.] Prompt ID, extraction key, per-layer residual vectors, full-vocabulary logits, optional final normalized state, numeric metadata, and shard references.
 \item[AnswerScores.] Raw A/B probabilities, canonical A/B probabilities, canonical-label mass, unrestricted greedy token ID, canonical greedy label, invalid-label flag, and scoring-version identifier.
 \item[SplitManifest.] Base-group ID to split mapping, eligible source universe, grouping version, seed, fractions, integer allocations, and manifest digest.
-\item[FilterReport.] Both paired eligibility masks, order-specific failures, population counts, split denominators, canonical-only diagnostics, paths, and report digest.
-\item[DecisionRecord.] Unused by the fixed filter. The initial protocol does not record a raw-versus-canonical choice.
-Each later analysis manifest records the applicable threshold, current diagnostic report, and inherited decision ID.
+\item[FilterReport.] Both paired eligibility masks, order-specific failures, population counts, split denominators, canonical-only diagnostics, and report digest. Output paths are written beside the record and do not enter the digest.
+Each later analysis manifest records the applicable threshold and current diagnostic report.
 \item[TaskSpec.] Task-specific input/output schemas, target construction, class meaning/order, permitted prediction-time features, decoding convention, and pointwise-score definition.
 \item[MethodSpec.] Task ID, method ID, task-specific adapter/interface version, declared fit/predict inputs, fitting requirement, optional shared architecture, method parameters, and output validation.
 \item[ProbeSpec.] Required layers/positions, preprocessing, probabilistic output interface, architecture configuration, and compatible tasks/losses.

@@ -4,7 +4,6 @@ from knowledge_recovery.errors import (
     ANSWER_REQUEST_KINDS,
     ASSET_KINDS,
     CACHE_MISMATCHES,
-    PROBABILITY_BASES,
     TOKEN_AUDIT_FIELDS,
     AnswerInstructionMismatch,
     CacheIncomplete,
@@ -42,7 +41,6 @@ def test_named_exceptions_exit_nonzero():
         "CacheIncomplete",
     ]
     assert all(issubclass(cls, KnowledgeRecoveryError) and cls.exit_code != 0 for cls in NAMED)
-    assert PROBABILITY_BASES == ("raw", "canonical")
 
 
 @pytest.mark.parametrize("field", TOKEN_AUDIT_FIELDS)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -139,11 +139,6 @@ def load_selection_manifest(path: Path | str) -> SelectionManifest:
         tie_break=record["tie_break"],
         refit_on_train_validation=bool(record["refit_on_train_validation"]),
     )
-
-
-def layer_choices(manifest: SelectionManifest) -> Sequence[LayerChoice]:
-    """Validation profile in layer order."""
-    return manifest.layers
 
 
 def _layer(item: Mapping[str, Any]) -> LayerChoice:

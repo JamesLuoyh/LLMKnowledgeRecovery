@@ -32,7 +32,6 @@ def _base_key():
         selected_position=3,
         execution_precision="bf16",
         attention_backend="sdpa",
-        logits_scope="full_vocabulary",
         numeric_runtime_signature={"backend": "integration_mock", "execution_precision": "bf16"},
     )
 
