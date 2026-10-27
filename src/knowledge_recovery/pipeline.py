@@ -7,6 +7,7 @@ probe-only stage are reported and do not construct a model.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import string
@@ -101,6 +102,10 @@ STAGE_ORDER = (
 )
 # First attempted extraction batch. An out-of-memory error halves it; it is not in the row key.
 EXTRACTION_BATCH_SIZE = 32
+# Row fields an extract worker's forward pass reads. The rendered text stays in the parent.
+EXTRACT_WORKER_FIELDS = (
+    "row_key", "input_ids", "attention_mask", "selected_position", "question", "order_id", "variant_id",
+)
 METHOD_BINDINGS = (
     ("behavioral_awareness", "linear_agreement", "linear"),
     ("behavioral_awareness", "training_frequency", "training_frequency"),
@@ -251,7 +256,8 @@ def rank_distractors_stage(request: StageRequest) -> None:
 
     Each question is asked with all of its choices in every cyclic order. Only
     the option-letter logits at the last input token are kept. The output is
-    read by ``prepare`` and is not part of the extraction cache.
+    read by ``prepare`` and is not part of the extraction cache. With more
+    than one visible GPU, each GPU ranks every n-th question in its own process.
     """
     config = _config(request)
     if config.extraction.dataset_adapter != "mmlu":
@@ -259,25 +265,11 @@ def rank_distractors_stage(request: StageRequest) -> None:
     validate_before_expensive_work(config)
     storage = _storage(config)
     activate_offline(storage / "assets" / "huggingface")
-    dataset = Path(config.extraction.dataset_path)
-    source_identity = _file_digest(dataset)
+    source_identity = _file_digest(Path(config.extraction.dataset_path))
     (storage / "normalized").mkdir(parents=True, exist_ok=True)
-    # The seed only fills a placeholder distractor; the ranking reads the choices.
-    candidates = recover_mmlu(
-        _read_rows(dataset),
-        source_identity=source_identity,
-        conflict_directory=storage / "normalized",
-        distractor_seed=0,
-    ).items
+    candidates = _rank_candidates(config, source_identity)
     tokenizer = _tokenizer(Path(config.extraction.model_path))
-
-    def encode(user_text: str) -> tuple[int, ...]:
-        return tokenizer.encode_prompt(PromptExample(
-            user_text=user_text,
-            chat=config.extraction.chat,
-            system_message=config.extraction.system_message,
-        ))
-
+    encode = _prompt_encoder(config, tokenizer)
     width = max(len(distinct_choices(item)) for item in candidates)
     probe = encode(candidates[0].question)
     letter_ids: dict[str, int] = {}
@@ -286,20 +278,22 @@ def rank_distractors_stage(request: StageRequest) -> None:
         if len(ids) != 1:
             raise KnowledgeRecoveryError(f"option letter {letter!r} is not a single token: {list(ids)}")
         letter_ids[letter] = int(ids[0])
-    model = load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
     ordered_ids = list(letter_ids.values())
+    devices = _visible_devices(config)
     from tqdm import tqdm
 
     total = sum(len(distinct_choices(item)) for item in candidates)
     with tqdm(total=total, desc="rank-distractors", unit="prompt", dynamic_ncols=True) as progress:
-        ranked = rank_items(
-            candidates,
-            instruction=config.extraction.instruction,
-            encode=encode,
-            letter_logits=lambda batch, count: _letter_logits(model, batch, ordered_ids[:count]),
-            batch_size=RANK_BATCH_SIZE,
-            progress=progress.update,
-        )
+        if len(devices) > 1:
+            jobs = [
+                (device, (request.config, shard, len(devices), ordered_ids))
+                for shard, device in enumerate(devices)
+            ]
+            ranked = {}
+            for part in _run_on_devices("rank-distractors", _rank_worker, jobs, progress.update):
+                ranked.update(part)
+        else:
+            ranked = _rank_shard(config, candidates, encode, ordered_ids, progress.update)
     _write_json(storage / DISTRACTOR_PREFERENCES, {
         **_ranking_identity(config, source_identity),
         "letter_token_ids": letter_ids,
@@ -352,27 +346,45 @@ def extract_stage(request: StageRequest) -> None:
     statuses = store.row_statuses([row["row_key"] for row in prepared])
     missing = [row["row_key"] for row in prepared if statuses[row["row_key"]] != "indexed"]
 
-    def factory() -> object:
-        return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+    canonical_ids = (int(audit.token_ids["A"]), int(audit.token_ids["B"]))
+    devices = _visible_devices(config) if missing else []
+    if len(devices) > 1:
+        # Every GPU stores a disjoint share of the missing rows; the lookup below reads them all.
+        absent = set(missing)
+        pending = [
+            {field: row[field] for field in EXTRACT_WORKER_FIELDS}
+            for row in prepared
+            if row["row_key"] in absent
+        ]
+        from tqdm import tqdm
 
-    canonical = CanonicalTokens(A=int(audit.token_ids["A"]), B=int(audit.token_ids["B"]))
-
-    def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
-        if model_config.get("logit_rule") == "integration_subset_v1":
-            from knowledge_recovery.integration import subset_forward
-
-            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
-        else:
-            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
-        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
-        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
-
-    if missing:
+        jobs = [
+            (device, (request.config, pending[shard::len(devices)], canonical_ids))
+            for shard, device in enumerate(devices)
+        ]
+        with tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress:
+            sizes = _run_on_devices("extract", _extract_worker, jobs, progress.update)
+        del pending
+        probed = run_extraction(
+            prepared,
+            store=store,
+            model_factory=None,
+            forward_batch=None,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
+            precision=config.extraction.precision,
+            probe_only=True,
+        )
+        result = dataclasses.replace(
+            probed,
+            constructed_model=True,
+            batch_sizes=tuple(size for part in sizes for size in part),
+        )
+    elif missing:
         result = run_extraction(
             prepared,
             store=store,
-            model_factory=factory,
-            forward_batch=forward,
+            model_factory=_model_factory(config),
+            forward_batch=_extract_forward(model_config, canonical_ids),
             initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
         )
@@ -380,8 +392,8 @@ def extract_stage(request: StageRequest) -> None:
         result = run_extraction(
             prepared,
             store=store,
-            model_factory=factory,
-            forward_batch=forward,
+            model_factory=_model_factory(config),
+            forward_batch=_extract_forward(model_config, canonical_ids),
             initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
             probe_only=True,
@@ -422,6 +434,52 @@ def extract_stage(request: StageRequest) -> None:
             for row in prepared
         ],
     })
+
+
+def _model_factory(config: ExperimentConfig) -> Callable[[], object]:
+    def factory() -> object:
+        return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+
+    return factory
+
+
+def _extract_forward(model_config: Mapping[str, Any], canonical_ids: tuple[int, int]) -> Callable[..., Any]:
+    """Forward a batch and keep the A/B logit summary in place of the full logits."""
+    canonical = CanonicalTokens(A=canonical_ids[0], B=canonical_ids[1])
+
+    def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
+        if model_config.get("logit_rule") == "integration_subset_v1":
+            from knowledge_recovery.integration import subset_forward
+
+            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
+        else:
+            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
+        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
+        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
+
+    return forward
+
+
+def _extract_worker(
+    config_path: str,
+    rows: list[dict[str, Any]],
+    canonical_ids: tuple[int, int],
+    *,
+    progress: Callable[[int], None],
+) -> tuple[int, ...]:
+    """Store one GPU's share of the missing rows. Returns the batch sizes used."""
+    config = load_config(config_path)
+    model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
+    result = run_extraction(
+        rows,
+        store=ExtractionStore(_storage(config)),
+        model_factory=_model_factory(config),
+        forward_batch=_extract_forward(model_config, canonical_ids),
+        initial_batch_size=EXTRACTION_BATCH_SIZE,
+        precision=config.extraction.precision,
+        progress=progress,
+    )
+    return result.batch_sizes
 
 
 def diagnose_stage(request: StageRequest) -> None:
@@ -1188,6 +1246,134 @@ def _distractor_preferences(config: ExperimentConfig, source_identity: str) -> M
             f"Run: {command}"
         )
     return saved["items"]
+
+
+def _rank_candidates(config: ExperimentConfig, source_identity: str) -> tuple[Any, ...]:
+    # The seed only fills a placeholder distractor; the ranking reads the choices.
+    return recover_mmlu(
+        _read_rows(Path(config.extraction.dataset_path)),
+        source_identity=source_identity,
+        conflict_directory=_storage(config) / "normalized",
+        distractor_seed=0,
+    ).items
+
+
+def _prompt_encoder(config: ExperimentConfig, tokenizer: Any) -> Callable[[str], tuple[int, ...]]:
+    def encode(user_text: str) -> tuple[int, ...]:
+        return tokenizer.encode_prompt(PromptExample(
+            user_text=user_text,
+            chat=config.extraction.chat,
+            system_message=config.extraction.system_message,
+        ))
+
+    return encode
+
+
+def _rank_shard(
+    config: ExperimentConfig,
+    candidates: Sequence[Any],
+    encode: Callable[[str], tuple[int, ...]],
+    ordered_ids: Sequence[int],
+    progress: Callable[[int], None],
+) -> dict[str, dict[str, Any]]:
+    model = load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+    return rank_items(
+        candidates,
+        instruction=config.extraction.instruction,
+        encode=encode,
+        letter_logits=lambda batch, count: _letter_logits(model, batch, ordered_ids[:count]),
+        batch_size=RANK_BATCH_SIZE,
+        progress=progress,
+    )
+
+
+def _visible_devices(config: ExperimentConfig) -> list[str]:
+    """GPU ids visible to this process, as ``CUDA_VISIBLE_DEVICES`` names them.
+
+    The integration mock runs on the CPU in one process.
+    """
+    model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
+    if model_config.get("model_type") == "integration_mock":
+        return []
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        return [device.strip() for device in visible.split(",") if device.strip()]
+    import torch
+
+    return [str(index) for index in range(torch.cuda.device_count())]
+
+
+def _run_on_devices(
+    stage: str,
+    target: Callable[..., Any],
+    jobs: Sequence[tuple[str, tuple[Any, ...]]],
+    progress: Callable[[int], None],
+) -> list[Any]:
+    """Spawn one worker per ``(device, args)`` job; return results in job order.
+
+    Each worker calls ``target(*args, progress=...)`` with only its GPU visible.
+    The first failure stops every worker.
+    """
+    import multiprocessing
+    import queue
+
+    context = multiprocessing.get_context("spawn")
+    messages = context.Queue()
+    workers = [
+        context.Process(target=_device_worker, args=(target, device, shard, args, messages), daemon=True)
+        for shard, (device, args) in enumerate(jobs)
+    ]
+    for worker in workers:
+        worker.start()
+    results: dict[int, Any] = {}
+    try:
+        while len(results) < len(workers):
+            try:
+                kind, shard, payload = messages.get(timeout=60)
+            except queue.Empty:
+                dead = [worker.exitcode for worker in workers if worker.exitcode not in (None, 0)]
+                if dead:
+                    raise KnowledgeRecoveryError(f"a {stage} worker exited with code {dead[0]}")
+                continue
+            if kind == "progress":
+                progress(payload)
+            elif kind == "done":
+                results[shard] = payload
+            else:
+                raise KnowledgeRecoveryError(f"a {stage} worker failed on GPU {jobs[shard][0]}:\n{payload}")
+    finally:
+        for worker in workers:
+            if worker.is_alive() and len(results) < len(workers):
+                worker.terminate()
+            worker.join()
+    return [results[shard] for shard in range(len(workers))]
+
+
+def _device_worker(target: Callable[..., Any], device: str, shard: int, args: tuple[Any, ...], messages: Any) -> None:
+    # Set before the first CUDA call so "cuda" names this GPU only.
+    os.environ["CUDA_VISIBLE_DEVICES"] = device
+    try:
+        result = target(*args, progress=lambda count: messages.put(("progress", shard, count)))
+        messages.put(("done", shard, result))
+    except BaseException:
+        import traceback
+
+        messages.put(("failed", shard, traceback.format_exc()))
+
+
+def _rank_worker(
+    config_path: str,
+    shard: int,
+    shards: int,
+    ordered_ids: list[int],
+    *,
+    progress: Callable[[int], None],
+) -> dict[str, dict[str, Any]]:
+    config = load_config(config_path)
+    source_identity = _file_digest(Path(config.extraction.dataset_path))
+    candidates = _rank_candidates(config, source_identity)[shard::shards]
+    encode = _prompt_encoder(config, _tokenizer(Path(config.extraction.model_path)))
+    return _rank_shard(config, candidates, encode, ordered_ids, progress)
 
 
 def _letter_logits(model: Any, batch: Sequence[Sequence[int]], token_ids: Sequence[int]) -> numpy.ndarray:
