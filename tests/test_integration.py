@@ -139,21 +139,26 @@ def test_diagnose_writes_variant_counts_and_can_apply_the_final_filter(tmp_path)
             "after_option_probability": 2,
             "after_both_orders_confident": 2,
         }
+    misreports = json.loads((directory / "misreport_report.json").read_text(encoding="utf-8"))
+    assert misreports["variants"] == ["T-C", "NT-C", "T-IC", "NT-IC"]
+    assert "after_variant_both_orders_confident" in misreports["steps"]
     scored = json.loads((storage / "analyses" / "scored.json").read_text(encoding="utf-8"))
     assert scored["variant_filter_digest"]
     assert scored["eligible_base_group_ids"] == [result["pass_group"]]
 
     config_path = tmp_path / "config.yaml"
     document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    document["analysis_view"]["filter_correct"]["require_all_variants"] = True
+    document["analysis_view"]["filter_correct"]["require_confident_on_every_variant"] = True
     config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
     diagnose_stage(StageRequest(stage="diagnose", config=str(config_path)))
     final = json.loads((directory / "variant_filter_report.json").read_text(encoding="utf-8"))["record"]
     assert final["population_counts"]["final"]["overall"]["base_questions"] == 1
-    assert "Final (all variants)" in (directory / "variant_filter_report.txt").read_text(encoding="utf-8")
+    assert "Final (confident on every variant)" in (directory / "variant_filter_report.txt").read_text(encoding="utf-8")
+    misreports = json.loads((directory / "misreport_report.json").read_text(encoding="utf-8"))
+    assert misreports["steps"][-1] == "after_confident_on_every_variant"
 
     document["analysis_view"]["filter_correct"]["variant_stats"] = False
-    document["analysis_view"]["filter_correct"]["require_all_variants"] = False
+    document["analysis_view"]["filter_correct"]["require_confident_on_every_variant"] = False
     config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
     diagnose_stage(StageRequest(stage="diagnose", config=str(config_path)))
     assert not (directory / "variant_filter_report.json").exists()

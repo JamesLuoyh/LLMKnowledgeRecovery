@@ -179,3 +179,43 @@ def test_a_write_verifies_only_its_own_shard(tmp_path, monkeypatch):
 
 def _published_key(label: str) -> str:
     return content_digest({"kind": "test_row", "label": label})
+
+
+def test_batched_writer_publishes_keys_in_bulk_and_skips_stored_rows(tmp_path):
+    store = ExtractionStore(tmp_path)
+    earlier = _published_key("earlier")
+    store.write_rows([_row(earlier)])
+    keys = [_published_key(f"batched-{index}") for index in range(5)]
+    index_path = tmp_path / "extractions" / "index.json"
+    with store.batched_writer(flush_every=2) as writer:
+        writer.write_rows([_row(earlier), _row(keys[0])])
+        assert store.row_status(keys[0]) == "complete_unindexed"
+        writer.write_rows([_row(keys[1])])
+        assert set(json.loads(index_path.read_bytes())["rows"]) == {earlier, keys[0], keys[1]}
+        writer.write_rows([_row(keys[2]), _row(keys[3])])
+        writer.write_rows([_row(keys[3])])
+        assert store.row_status(keys[2]) == "complete_unindexed"
+    references = store.lookup([earlier, *keys[:4]], model_factory=_boom, extraction_command=COMMAND)
+    assert [item.row_offset for item in references] == [0, 0, 0, 0, 1]
+    assert len(list((tmp_path / "extractions" / "shards").iterdir())) == 4
+    assert store.row_status(keys[4]) == "absent"
+
+
+def test_batched_writer_flush_merges_with_keys_indexed_after_it_started(tmp_path):
+    store = ExtractionStore(tmp_path)
+    mine = _published_key("mine")
+    other = _published_key("other")
+    with store.batched_writer(flush_every=100) as writer:
+        writer.write_rows([_row(mine)])
+        store.write_rows([_row(other)])
+    assert store.row_status(mine) == store.row_status(other) == "indexed"
+
+
+def test_a_crash_before_flush_leaves_sealed_shards_that_commit_index_publishes(tmp_path):
+    store = ExtractionStore(tmp_path)
+    key = _published_key("crash")
+    writer = store.batched_writer(flush_every=100)
+    writer.write_rows([_row(key)])
+    assert store.row_status(key) == "complete_unindexed"
+    store.commit_index()
+    assert store.row_status(key) == "indexed"

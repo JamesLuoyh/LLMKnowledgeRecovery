@@ -10,6 +10,10 @@ position. There is no raw-versus-canonical choice.
 The optional variant gate applies steps 1 and 2 to each intervened variant,
 starting from the questions that passed the clean filter, and then requires
 both orders to pass. It has no correct-label step.
+
+The misreport report counts, for each intervened variant, the rows whose
+normalized A/B argmax differs from the clean row of the same question and
+order. It counts before any filter and after every clean and variant step.
 """
 
 from __future__ import annotations
@@ -41,6 +45,19 @@ VARIANT_COUNT_STEPS = (
     "after_option_probability",
     "after_both_orders_confident",
 )
+MISREPORT_STEPS = (
+    "before",
+    "after_clean_greedy_is_option",
+    "after_clean_option_probability",
+    "after_clean_greedy_correct",
+    "after_clean_both_orders_correct",
+)
+MISREPORT_VARIANT_STEPS = (
+    "after_variant_greedy_is_option",
+    "after_variant_option_probability",
+    "after_variant_both_orders_confident",
+)
+MISREPORT_FINAL_STEP = "after_confident_on_every_variant"
 
 
 @dataclass(frozen=True)
@@ -102,7 +119,7 @@ class FilterOutcome:
 class VariantFilterOutcome:
     """Questions that passed each variant, and the final eligible set.
 
-    Without ``require_all`` the final set is the clean-filtered pool unchanged.
+    Without ``require_confident_on_every_variant`` the final set is the clean-filtered pool unchanged.
     """
 
     eligible_base_group_ids: tuple[str, ...]
@@ -144,19 +161,19 @@ def apply_variant_gate(
     *,
     output_directory: str | Path,
     min_correct_prob: float = 0.8,
-    require_all: bool = False,
+    require_confident_on_every_variant: bool = False,
 ) -> VariantFilterOutcome:
     """Write three-step counts per variant over the clean-filtered pool.
 
     Orders outside ``pool_ids`` are ignored. Every pool question must have
-    both orders in every variant. With ``require_all`` the final set keeps
+    both orders in every variant. With ``require_confident_on_every_variant`` the final set keeps
     only questions that passed on every variant.
     """
     threshold = _threshold(min_correct_prob)
     if not isinstance(orders_by_variant, Mapping) or not orders_by_variant:
         raise ValueError("orders_by_variant must be a non-empty mapping")
-    if type(require_all) is not bool:
-        raise TypeError("require_all must be a boolean")
+    if type(require_confident_on_every_variant) is not bool:
+        raise TypeError("require_confident_on_every_variant must be a boolean")
     pool = tuple(sorted(set(pool_ids)))
     allowed = set(pool)
     pairs_by_variant: dict[str, tuple[_Pair, ...]] = {}
@@ -177,7 +194,7 @@ def apply_variant_gate(
         variant_id: tuple(pair.base_group_id for pair in pairs if pair.passed)
         for variant_id, pairs in pairs_by_variant.items()
     }
-    if require_all:
+    if require_confident_on_every_variant:
         survivors = set(pool)
         for ids in passed.values():
             survivors &= set(ids)
@@ -192,7 +209,7 @@ def apply_variant_gate(
         eligible=eligible,
         splits=splits,
         threshold=threshold,
-        require_all=require_all,
+        require_confident_on_every_variant=require_confident_on_every_variant,
         directory=directory,
     )
     digest = _write(directory, report, _render_variants(report), stem="variant_filter_report")
@@ -202,6 +219,140 @@ def apply_variant_gate(
         report_digest=digest,
         min_correct_prob=threshold,
     )
+
+
+def write_misreport_report(
+    clean_orders: Sequence[CleanOrder],
+    orders_by_variant: Mapping[str, Sequence[CleanOrder]],
+    *,
+    output_directory: str | Path,
+    min_correct_prob: float = 0.8,
+    variant_steps: bool = False,
+    require_confident_on_every_variant: bool = False,
+) -> dict[str, Any]:
+    """Write misreport counts per variant before and after each filter step.
+
+    A misreport is a row whose normalized A/B argmax differs from the clean
+    row's argmax for the same question and order. Each step keeps the rows
+    that pass it and every earlier step. Clean steps use the clean row, and
+    variant steps use the variant row. ``require_confident_on_every_variant`` adds the cross-variant
+    step and needs ``variant_steps``.
+    """
+    threshold = _threshold(min_correct_prob)
+    if require_confident_on_every_variant and not variant_steps:
+        raise ValueError("require_confident_on_every_variant needs variant_steps")
+    clean = {pair.base_group_id: pair for pair in _pairs(clean_orders, threshold)}
+    variants: dict[str, dict[str, _Pair]] = {}
+    for variant_id, orders in orders_by_variant.items():
+        if type(variant_id) is not str or variant_id == "":
+            raise ValueError("variant ids must be non-empty strings")
+        pairs = {
+            pair.base_group_id: pair
+            for pair in _pairs(orders, threshold, require_correct=False, label=variant_id)
+        }
+        if set(pairs) != set(clean):
+            raise ValueError(f"variant {variant_id} does not cover the same questions as clean")
+        variants[variant_id] = pairs
+    steps = list(MISREPORT_STEPS)
+    if variant_steps:
+        steps.extend(MISREPORT_VARIANT_STEPS)
+    if require_confident_on_every_variant:
+        steps.append(MISREPORT_FINAL_STEP)
+    all_passed = {
+        group for group in clean
+        if clean[group].passed and all(pairs[group].passed for pairs in variants.values())
+    }
+    counts: dict[str, Any] = {}
+    for variant_id, pairs in variants.items():
+        rows = []
+        for group, pair in clean.items():
+            for order_id in ORDERS:
+                rows.append((
+                    pair.split,
+                    order_id,
+                    _misreport_reached(order_id, pair, pairs[group], threshold, group in all_passed),
+                    _greedy_option(_order_of(pairs[group], order_id))
+                    != _greedy_option(_order_of(pair, order_id)),
+                ))
+        counts[variant_id] = {
+            "overall": _misreport_block(rows, steps),
+            "by_split": {
+                split: _misreport_block([row for row in rows if row[0] == split], steps)
+                for split in SPLITS
+            },
+        }
+    report = {
+        "definition": "variant normalized A/B argmax differs from the clean argmax for the same question and order",
+        "threshold": threshold,
+        "variants": list(variants),
+        "steps": steps,
+        "counts": counts,
+    }
+    directory = Path(output_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    _atomic_text(
+        directory / "misreport_report.json",
+        json.dumps(report, indent=2, allow_nan=False) + "\n",
+    )
+    _atomic_text(directory / "misreport_report.txt", _render_misreports(report))
+    return report
+
+
+def _order_of(pair: _Pair, order_id: str) -> CleanOrder:
+    return pair.correct_at_a if order_id == "correct_at_A" else pair.correct_at_b
+
+
+def _misreport_reached(
+    order_id: str, clean: _Pair, variant: _Pair, threshold: float, all_passed: bool
+) -> int:
+    """Index of the last step passed, counting ``before`` as step 0."""
+    clean_step = _last_step(_order_of(clean, order_id), threshold)
+    if clean_step < 3:
+        return clean_step
+    if not clean.passed:
+        return 3
+    variant_step = _last_step(_order_of(variant, order_id), threshold)
+    if variant_step < 2:
+        return 4 + variant_step
+    if not variant.passed:
+        return 6
+    return 8 if all_passed else 7
+
+
+def _misreport_block(rows: Sequence[tuple[str, str, int, bool]], steps: Sequence[str]) -> dict[str, Any]:
+    block = {}
+    for count_set in COUNT_SETS:
+        chosen = [row for row in rows if count_set == "both_orders" or row[1] == count_set]
+        block[count_set] = {
+            step: {
+                "rows": sum(row[2] >= index for row in chosen),
+                "misreports": sum(row[2] >= index and row[3] for row in chosen),
+            }
+            for index, step in enumerate(steps)
+        }
+    return block
+
+
+def _render_misreports(report: Mapping[str, Any]) -> str:
+    lines = [
+        "Misreports per intervened variant",
+        "A misreport is a row whose normalized A/B argmax differs from the clean row",
+        "of the same question and order. Each step keeps rows that pass it and every",
+        f"earlier step. Threshold: greater than {report['threshold']}.",
+    ]
+    for variant_id in report["variants"]:
+        scopes = [("Overall", report["counts"][variant_id]["overall"])] + [
+            (f"Split {split}", report["counts"][variant_id]["by_split"][split]) for split in SPLITS
+        ]
+        for scope, block in scopes:
+            lines.extend(["", f"Variant: {variant_id} | {scope}"])
+            for count_set in COUNT_SETS:
+                lines.append(count_set)
+                for step in report["steps"]:
+                    cell = block[count_set][step]
+                    rate = f"{cell['misreports'] / cell['rows']:.3f}" if cell["rows"] else "n/a"
+                    lines.append(f"  {step}: {cell['misreports']}/{cell['rows']} ({rate})")
+    return "\n".join(lines) + "\n"
 
 
 def _pairs(
@@ -379,7 +530,7 @@ def _variant_report(
     eligible: Sequence[str],
     splits: Mapping[str, str],
     threshold: float,
-    require_all: bool,
+    require_confident_on_every_variant: bool,
     directory: Path,
 ) -> FilterReport:
     population: dict[str, Any] = {
@@ -391,7 +542,7 @@ def _variant_report(
         }
         for variant_id, pairs in pairs_by_variant.items()
     }
-    if require_all:
+    if require_confident_on_every_variant:
         population["final"] = {
             "overall": _final_units(eligible),
             "by_split": {
@@ -406,7 +557,7 @@ def _variant_report(
             "comparison": "greater_than",
             "require_both_orders": True,
             "require_correct_label": False,
-            "require_all_variants": require_all,
+            "require_confident_on_every_variant": require_confident_on_every_variant,
             "pool_size": len(pool),
             "eligible_base_group_ids": list(eligible),
         },
@@ -488,11 +639,11 @@ def _render_variants(report: FilterReport) -> str:
         for split in SPLITS:
             lines.extend(["", f"Split {split}"])
             _append_block(lines, counts[variant_id]["by_split"][split], VARIANT_COUNT_STEPS)
-    if eligibility["require_all_variants"]:
+    if eligibility["require_confident_on_every_variant"]:
         final = counts["final"]
         lines.extend([
             "",
-            "Final (all variants)",
+            "Final (confident on every variant)",
             f"Kept: questions that passed step 3 on {', '.join(eligibility['variants'])}",
             "Overall",
         ])
@@ -501,7 +652,7 @@ def _render_variants(report: FilterReport) -> str:
             lines.append(f"Split {split}")
             lines.extend(f"  {key}: {value}" for key, value in final["by_split"][split].items())
     else:
-        lines.extend(["", "Final filter across all variants: not applied"])
+        lines.extend(["", "Final filter (confident on every variant): not applied"])
     return "\n".join(lines) + "\n"
 
 

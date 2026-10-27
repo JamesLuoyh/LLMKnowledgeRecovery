@@ -47,7 +47,7 @@ def test_stored_fixtures_match_clean_and_all_variants_in_both_orders():
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert fixture["instruction"] == INITIAL_INSTRUCTION
     assert fixture["system_message"] == INITIAL_SYSTEM_MESSAGE
-    extraction = load_config(ROOT / "configs" / "initial_sycophancy.yaml").extraction
+    extraction = load_config(ROOT / "tests" / "fixtures" / "initial_sycophancy.yaml").extraction
     instances = {
         instance.variant_id: instance
         for instance in materialize_interventions([_item()], specs_from_config(extraction)).instances
@@ -181,7 +181,7 @@ def test_no_chat_wraps_only_the_user_text():
         _item(),
         materialize_interventions(
             [_item()],
-            specs_from_config(load_config(ROOT / "configs" / "initial_sycophancy.yaml").extraction),
+            specs_from_config(load_config(ROOT / "tests" / "fixtures" / "initial_sycophancy.yaml").extraction),
         ).instances[0],
         instruction="Go.",
         chat=False,
@@ -204,7 +204,7 @@ def test_no_chat_wraps_only_the_user_text():
             _item(),
             materialize_interventions(
                 [_item()],
-                specs_from_config(load_config(ROOT / "configs" / "initial_sycophancy.yaml").extraction),
+                specs_from_config(load_config(ROOT / "tests" / "fixtures" / "initial_sycophancy.yaml").extraction),
             ).instances[0],
             instruction="Go.",
             chat=False,

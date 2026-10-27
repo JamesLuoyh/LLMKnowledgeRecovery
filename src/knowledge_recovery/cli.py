@@ -16,6 +16,7 @@ from knowledge_recovery.errors import KnowledgeRecoveryError
 
 CONFIG_STAGES = (
     "validate",
+    "rank-distractors",
     "prepare",
     "audit-tokens",
     "extract",

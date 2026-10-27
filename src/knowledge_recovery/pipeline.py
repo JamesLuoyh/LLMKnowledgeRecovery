@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +22,13 @@ from knowledge_recovery.answers.canonical import CanonicalTokens, score_binary_a
 from knowledge_recovery.cache.store import ExtractionStore
 from knowledge_recovery.cli import StageRequest
 from knowledge_recovery.config import ExperimentConfig, load_config, validate_before_expensive_work
+from knowledge_recovery.datasets.distractor_ranking import (
+    PREFERRED_SELECTIONS,
+    RANKING_VERSION,
+    distinct_choices,
+    rank_items,
+)
+from knowledge_recovery.datasets.mmlu import recover_mmlu
 from knowledge_recovery.datasets.sycophancy import recover_sycophancy
 from knowledge_recovery.errors import (
     SUPPORTED_POSITION_SELECTOR,
@@ -33,7 +41,7 @@ from knowledge_recovery.evaluation.behavior import BehaviorRow, behavior_documen
 from knowledge_recovery.evaluation.evaluate import EvaluationRow, evaluate_saved
 from knowledge_recovery.evaluation.metrics import DEFAULT_ECE_BINS
 from knowledge_recovery.extraction.identity import build_row_key
-from knowledge_recovery.extraction.positions import last_nonpadding_index
+from knowledge_recovery.extraction.positions import last_nonpadding_index, select_last_nonpadding
 from knowledge_recovery.extraction.runner import run_extraction
 from knowledge_recovery.interventions.materialize import materialize_interventions, specs_from_config
 from knowledge_recovery.methods.awareness import RULE as TRAINING_FREQUENCY_RULE
@@ -66,12 +74,18 @@ from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
 from knowledge_recovery.training.fit import TRAINING_IMPLEMENTATION_VERSION, fit_linear_probe
 from knowledge_recovery.training.manifest import write_selection_manifest
 from knowledge_recovery.training.select import select_probe
-from knowledge_recovery.views.build import ScoredRow, build_task_views
-from knowledge_recovery.views.filters import CleanOrder, apply_filter_gate, apply_variant_gate
+from knowledge_recovery.views.build import ScoredRow, build_task_views, view_summary
+from knowledge_recovery.views.filters import (
+    CleanOrder,
+    apply_filter_gate,
+    apply_variant_gate,
+    write_misreport_report,
+)
 from knowledge_recovery.views.splits import freeze_grouped_split
 
 STAGE_ORDER = (
     "validate",
+    "rank-distractors",
     "prepare",
     "audit-tokens",
     "extract",
@@ -155,11 +169,27 @@ def prepare_stage(request: StageRequest) -> None:
     activate_offline(storage / "assets" / "huggingface")
     rows = _read_rows(Path(config.extraction.dataset_path))
     (storage / "normalized").mkdir(parents=True, exist_ok=True)
-    normalized = recover_sycophancy(
-        rows,
-        source_identity=_file_digest(Path(config.extraction.dataset_path)),
-        conflict_directory=storage / "normalized",
-    )
+    source_identity = _file_digest(Path(config.extraction.dataset_path))
+    if config.extraction.dataset_adapter == "mmlu":
+        selection = config.extraction.distractor_selection
+        normalized = recover_mmlu(
+            rows,
+            source_identity=source_identity,
+            conflict_directory=storage / "normalized",
+            distractor_seed=config.extraction.distractor_seed,
+            distractor_selection=selection,
+            preferences=(
+                _distractor_preferences(config, source_identity)
+                if selection in PREFERRED_SELECTIONS
+                else None
+            ),
+        )
+    else:
+        normalized = recover_sycophancy(
+            rows,
+            source_identity=source_identity,
+            conflict_directory=storage / "normalized",
+        )
     # The split universe is the base-group ids. Intervention coverage is not an input.
     split = freeze_grouped_split(
         [item.duplicate_group_id for item in normalized.items],
@@ -208,6 +238,68 @@ def prepare_stage(request: StageRequest) -> None:
         "instances": [_plain(instance.payload()) for instance in materialized.instances],
     })
     _write_json(storage / "prompts" / "rendered.json", rendered)
+
+
+def rank_distractors_stage(request: StageRequest) -> None:
+    """Score every MMLU choice with the model for most/least preferred distractor selection.
+
+    Each question is asked with all of its choices in every cyclic order. Only
+    the option-letter logits at the last input token are kept. The output is
+    read by ``prepare`` and is not part of the extraction cache.
+    """
+    config = _config(request)
+    if config.extraction.dataset_adapter != "mmlu":
+        raise KnowledgeRecoveryError("rank-distractors applies only to the mmlu adapter")
+    validate_before_expensive_work(config)
+    storage = _storage(config)
+    activate_offline(storage / "assets" / "huggingface")
+    dataset = Path(config.extraction.dataset_path)
+    source_identity = _file_digest(dataset)
+    (storage / "normalized").mkdir(parents=True, exist_ok=True)
+    # The seed only fills a placeholder distractor; the ranking reads the choices.
+    candidates = recover_mmlu(
+        _read_rows(dataset),
+        source_identity=source_identity,
+        conflict_directory=storage / "normalized",
+        distractor_seed=0,
+    ).items
+    tokenizer = _tokenizer(Path(config.extraction.model_path))
+
+    def encode(user_text: str) -> tuple[int, ...]:
+        return tokenizer.encode_prompt(PromptExample(
+            user_text=user_text,
+            chat=config.extraction.chat,
+            system_message=config.extraction.system_message,
+        ))
+
+    width = max(len(distinct_choices(item)) for item in candidates)
+    probe = encode(candidates[0].question)
+    letter_ids: dict[str, int] = {}
+    for letter in string.ascii_uppercase[:width]:
+        ids = tokenizer.continuation_ids(probe, letter)
+        if len(ids) != 1:
+            raise KnowledgeRecoveryError(f"option letter {letter!r} is not a single token: {list(ids)}")
+        letter_ids[letter] = int(ids[0])
+    model = load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+    ordered_ids = list(letter_ids.values())
+    from tqdm import tqdm
+
+    total = sum(len(distinct_choices(item)) for item in candidates)
+    with tqdm(total=total, desc="rank-distractors", unit="prompt", dynamic_ncols=True) as progress:
+        ranked = rank_items(
+            candidates,
+            instruction=config.extraction.instruction,
+            encode=encode,
+            letter_logits=lambda batch, count: _letter_logits(model, batch, ordered_ids[:count]),
+            batch_size=RANK_BATCH_SIZE,
+            progress=progress.update,
+        )
+    _write_json(storage / DISTRACTOR_PREFERENCES, {
+        **_ranking_identity(config, source_identity),
+        "letter_token_ids": letter_ids,
+        "orders": "cyclic_rotations",
+        "items": ranked,
+    })
 
 
 def audit_tokens_stage(request: StageRequest) -> None:
@@ -376,33 +468,42 @@ def diagnose_stage(request: StageRequest) -> None:
     eligible = outcome.eligible_base_group_ids
     variant_digest = None
     variant_directory = storage / "analyses" / "filter"
-    if config.analysis_view.variant_stats:
-        intervened = [
-            variant_id
-            for variant_id in dict.fromkeys(row["variant_id"] for row in scored)
-            if variant_id != config.analysis_view.filter_variant
+    intervened = [
+        variant_id
+        for variant_id in dict.fromkeys(row["variant_id"] for row in scored)
+        if variant_id != config.analysis_view.filter_variant
+    ]
+    orders_by_variant = {
+        variant_id: [
+            CleanOrder(
+                base_group_id=row["base_group_id"],
+                split=row["split"],
+                order_id=row["order_id"],
+                raw_ab_probabilities=row["scores"].raw_ab_probabilities,
+                canonical_ab_probabilities=row["scores"].canonical_ab_probabilities,
+                canonical_label_mass=row["scores"].canonical_label_mass,
+                invalid_label=row["scores"].invalid_label,
+            )
+            for row in scored
+            if row["variant_id"] == variant_id
         ]
+        for variant_id in intervened
+    }
+    write_misreport_report(
+        clean_orders,
+        orders_by_variant,
+        output_directory=variant_directory,
+        min_correct_prob=config.analysis_view.min_correct_prob,
+        variant_steps=config.analysis_view.variant_stats,
+        require_confident_on_every_variant=config.analysis_view.require_confident_on_every_variant,
+    )
+    if config.analysis_view.variant_stats:
         variant_outcome = apply_variant_gate(
-            {
-                variant_id: [
-                    CleanOrder(
-                        base_group_id=row["base_group_id"],
-                        split=row["split"],
-                        order_id=row["order_id"],
-                        raw_ab_probabilities=row["scores"].raw_ab_probabilities,
-                        canonical_ab_probabilities=row["scores"].canonical_ab_probabilities,
-                        canonical_label_mass=row["scores"].canonical_label_mass,
-                        invalid_label=row["scores"].invalid_label,
-                    )
-                    for row in scored
-                    if row["variant_id"] == variant_id
-                ]
-                for variant_id in intervened
-            },
+            orders_by_variant,
             eligible,
             output_directory=variant_directory,
             min_correct_prob=config.analysis_view.min_correct_prob,
-            require_all=config.analysis_view.require_all_variants,
+            require_confident_on_every_variant=config.analysis_view.require_confident_on_every_variant,
         )
         variant_digest = variant_outcome.report_digest
         eligible = variant_outcome.eligible_base_group_ids
@@ -442,7 +543,7 @@ def diagnose_stage(request: StageRequest) -> None:
     _write_json(storage / "analyses" / "scored.json", {
         "filter_digest": outcome.report_digest,
         "variant_filter_digest": variant_digest,
-        "require_all_variants": config.analysis_view.require_all_variants,
+        "require_confident_on_every_variant": config.analysis_view.require_confident_on_every_variant,
         "eligible_base_group_ids": list(eligible),
         "rows": [
             {
@@ -490,6 +591,7 @@ def build_view_stage(request: StageRequest) -> None:
         _write_json(path, {"name": name, "view_id": artifact.digest, "sidecar": record})
         index[name] = {"view_id": artifact.digest, "path": path.name}
     _write_json(storage / "views" / "index.json", index)
+    print(view_summary(views, skipped_ood=not config.analysis_view.eval_variants))
 
 
 def train_stage(request: StageRequest) -> None:
@@ -709,6 +811,8 @@ def _evaluation_rows(storage: Path, views: Mapping[str, Mapping[str, Any]]) -> t
     result: list[EvaluationRow] = []
     view_ids: dict[str, str] = {}
     for suffix, domain in (("evaluation_id", "id"), ("evaluation_ood", "ood")):
+        if domain == "ood" and f"{AWARENESS_TASK_ID}/{suffix}" not in views:
+            continue
         awareness = views[f"{AWARENESS_TASK_ID}/{suffix}"]
         consistency = views[f"{CONSISTENCY_TASK_ID}/{suffix}"]
         view_ids[f"{AWARENESS_TASK_ID}/{suffix}"] = awareness["view_id"]
@@ -965,6 +1069,13 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "name": extraction.dataset_name,
             "split": extraction.dataset_split,
             "revision": extraction.dataset_revision,
+            **({"distractor_seed": extraction.distractor_seed} if extraction.distractor_seed is not None else {}),
+            # Absent for seeded_random so earlier MMLU collections keep their signature.
+            **(
+                {"distractor_selection": extraction.distractor_selection}
+                if extraction.distractor_selection in PREFERRED_SELECTIONS
+                else {}
+            ),
         },
         "prompt": {
             "chat": extraction.chat,
@@ -991,7 +1102,7 @@ def _reporting(config: ExperimentConfig) -> dict[str, Any]:
         "training_seed": config.probe_run.training_seed,
         "filter_threshold": config.analysis_view.min_correct_prob,
         "variant_stats": config.analysis_view.variant_stats,
-        "require_all_variants": config.analysis_view.require_all_variants,
+        "require_confident_on_every_variant": config.analysis_view.require_confident_on_every_variant,
         "loss": config.probe_run.loss,
         "ece_bins": config.probe_run.ece_bins,
         "ood_variants": list(config.analysis_view.eval_variants),
@@ -1038,6 +1149,66 @@ def _config(request: StageRequest) -> ExperimentConfig:
     if not request.config:
         raise KnowledgeRecoveryError("this stage requires --config pointing at the three typed objects")
     return load_config(request.config)
+
+
+DISTRACTOR_PREFERENCES = Path("normalized") / "distractor_preferences.json"
+RANK_BATCH_SIZE = 16
+
+
+def _ranking_identity(config: ExperimentConfig, source_identity: str) -> dict[str, Any]:
+    """Inputs that must match between rank-distractors and prepare."""
+    extraction = config.extraction
+    return {
+        "kind": "mmlu_distractor_preferences",
+        "ranking_version": RANKING_VERSION,
+        "source_identity": source_identity,
+        "model_path": extraction.model_path,
+        "model_revision": extraction.model_revision,
+        "precision": extraction.precision,
+        "chat": extraction.chat,
+        "system_message": extraction.system_message,
+        "instruction": extraction.instruction,
+    }
+
+
+def _distractor_preferences(config: ExperimentConfig, source_identity: str) -> Mapping[str, Any]:
+    path = _storage(config) / DISTRACTOR_PREFERENCES
+    command = f"kr rank-distractors --config {_config_token(config.path)}"
+    if not path.is_file():
+        raise KnowledgeRecoveryError(
+            f"{config.extraction.distractor_selection} needs model choice preferences: {path}\n"
+            f"Run: {command}"
+        )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = _ranking_identity(config, source_identity)
+    changed = sorted(key for key, value in expected.items() if saved.get(key) != value)
+    if changed:
+        raise KnowledgeRecoveryError(
+            f"Distractor preferences in {path} were made with different {', '.join(changed)}.\n"
+            f"Run: {command}"
+        )
+    return saved["items"]
+
+
+def _letter_logits(model: Any, batch: Sequence[Sequence[int]], token_ids: Sequence[int]) -> numpy.ndarray:
+    """Option-letter logits at the last real token, without storing hidden states."""
+    width = max(len(ids) for ids in batch)
+    padded = [list(ids) + [0] * (width - len(ids)) for ids in batch]
+    mask = [[1] * len(ids) + [0] * (width - len(ids)) for ids in batch]
+    inner = getattr(model, "inner", None)
+    if inner is None:
+        full = numpy.asarray(model.forward(padded, mask))
+        return select_last_nonpadding(full, numpy.asarray(mask))[:, list(token_ids)]
+    import torch
+
+    ids = torch.tensor(padded, dtype=torch.long, device=model.device)
+    attention = torch.tensor(mask, dtype=torch.long, device=model.device)
+    with torch.no_grad():
+        hidden = inner.model(input_ids=ids, attention_mask=attention, use_cache=False).last_hidden_state
+        last = attention.sum(dim=1) - 1
+        picked = hidden[torch.arange(len(batch), device=hidden.device), last]
+        logits = inner.lm_head(picked)[:, list(token_ids)]
+    return logits.float().cpu().numpy()
 
 
 def _storage(config: ExperimentConfig) -> Path:
@@ -1094,6 +1265,7 @@ def _refuse_model() -> None:
 
 STAGE_HANDLERS = {
     "validate": validate_stage,
+    "rank-distractors": rank_distractors_stage,
     "prepare": prepare_stage,
     "audit-tokens": audit_tokens_stage,
     "extract": extract_stage,

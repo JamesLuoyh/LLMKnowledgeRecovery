@@ -8,6 +8,7 @@ from knowledge_recovery.evaluation import (
     awareness_metrics,
     consistency_metrics,
     metrics_document,
+    roc_auc,
 )
 
 
@@ -131,6 +132,21 @@ def test_low_confidence_bins_stay_empty_because_top_label_confidence_is_at_least
     assert all(item.count == 0 for item in report.bins[:7])
     assert report.bins[7].count == 1
     assert report.bins[14].count == 2
+
+
+def test_roc_auc_uses_average_ranks_and_is_undefined_for_one_class():
+    # Positives 0.35 and 0.8 against negatives 0.1 and 0.4: 1 + 2 wins of 4 pairs.
+    assert roc_auc([0.1, 0.4, 0.35, 0.8], [0, 0, 1, 1]) == 0.75
+    assert roc_auc([0.2, 0.2], [0, 1]) == 0.5
+    assert roc_auc([0.3, 0.3, 0.3], [0, 1, 0]) == 0.5
+    assert roc_auc([0.1, 0.9], [1, 1]) is None
+    assert roc_auc([], []) is None
+    with pytest.raises(ValueError, match="same length"):
+        roc_auc([0.5], [])
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        roc_auc([1.5], [1])
+    with pytest.raises(ValueError, match="0 or 1"):
+        roc_auc([0.5], [2])
 
 
 def test_row_order_does_not_change_aggregates_and_bad_rows_are_rejected():

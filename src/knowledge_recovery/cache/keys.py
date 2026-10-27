@@ -31,7 +31,7 @@ REPORTING_SETTINGS = (
     "filter_threshold",
     "min_correct_prob",
     "variant_stats",
-    "require_all_variants",
+    "require_confident_on_every_variant",
     "probability_basis",
     "ood_variants",
     "test_variants",

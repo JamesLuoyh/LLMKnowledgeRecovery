@@ -6,6 +6,7 @@ from knowledge_recovery.views.filters import (
     VariantFilterOutcome,
     apply_filter_gate,
     apply_variant_gate,
+    write_misreport_report,
 )
 from knowledge_recovery.views.splits import GROUPING_ALGORITHM, freeze_grouped_split, grouping_version
 
@@ -18,4 +19,5 @@ __all__ = [
     "apply_variant_gate",
     "freeze_grouped_split",
     "grouping_version",
+    "write_misreport_report",
 ]

@@ -119,6 +119,21 @@ def test_saved_predictions_reproduce_metrics_without_fitting_or_model_loading(tm
     assert exported["confidence_intervals"] is None
 
 
+def test_without_ood_rows_the_report_has_no_ood_metrics(tmp_path):
+    report = evaluate_saved(
+        tuple(row for row in _rows() if row.domain == "id"),
+        awareness_manifest=_manifest(tmp_path / "awareness", AWARENESS_TASK_ID),
+        consistency_manifest=_manifest(tmp_path / "consistency", CONSISTENCY_TASK_ID),
+        frequency=_frequency(),
+        contextual=_contextual(),
+        evaluation_view_id=_view(),
+    )
+    for methods in report["test_metrics"].values():
+        for block in methods.values():
+            assert list(block["domains"]) == ["id"]
+    assert {item["domain"] for item in iter_metric_rows(report)} == {"id"}
+
+
 def _rows() -> tuple[EvaluationRow, ...]:
     return (
         _row("id-v1", "id", "v1", "correct_at_A", 1, 1, (0.2, 0.8)),
