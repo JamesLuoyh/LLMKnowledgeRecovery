@@ -809,6 +809,7 @@ def _train_method(config, storage, views, task_id: str, method_id: str, config_n
         layers=tuple(range(1, train_residuals.shape[1] + 1)), task_id=task_id,
         training_seed=config.probe_run.training_seed, train_domains=("id",) * len(targets),
         validation_domains=("id",) * len(valid_rows),
+        processes=LINEAR_FIT_PROCESSES,
     )
     selection = select_probe(fits)
     write_selection_manifest(bundle / task_id / method_id, selection)
@@ -958,8 +959,13 @@ def _residuals(store: ExtractionStore, rows: Sequence[Mapping[str, Any]]) -> num
         references = store.lookup(keys, model_factory=_refuse_model, extraction_command="kr extract --config cache")
     except CacheIncomplete:
         raise
-    stacked = [store.read_residual_row(reference) for reference in references]
-    return numpy.stack(stacked).astype(numpy.float32)
+    # Callers reject empty views. Fill one float32 array instead of stacking a list of rows, which needs twice the memory.
+    first = store.read_residual_row(references[0])
+    stacked = numpy.empty((len(references), *first.shape), dtype=numpy.float32)
+    stacked[0] = first
+    for position, reference in enumerate(references[1:], start=1):
+        stacked[position] = store.read_residual_row(reference)
+    return stacked
 
 
 def _behavior_instance_labels(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str, str], str]:
@@ -1246,6 +1252,9 @@ def _config(request: StageRequest) -> ExperimentConfig:
 
 DISTRACTOR_PREFERENCES = Path("normalized") / "distractor_preferences.json"
 RANK_BATCH_SIZE = 16
+# Layers fit at once in single-threaded processes. Each holds about 40 GB for the
+# 377k-row MMLU training view (its float32 slice plus float64 and standardized copies).
+LINEAR_FIT_PROCESSES = 8
 
 
 def _ranking_identity(config: ExperimentConfig, source_identity: str) -> dict[str, Any]:

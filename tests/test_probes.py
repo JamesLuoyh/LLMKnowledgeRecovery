@@ -226,3 +226,23 @@ def _probe(fitted: LayerFit, *, task_id: str):
         validation_cross_entropy=checkpoint.validation_cross_entropy,
         selected_layer=fitted.layer,
     )
+
+
+def test_fitting_layers_in_processes_matches_fitting_them_in_order():
+    rng = numpy.random.default_rng(0)
+    train = rng.standard_normal((64, 3, 4)).astype(numpy.float32)
+    validation = rng.standard_normal((16, 3, 4)).astype(numpy.float32)
+    targets = [int(value) for value in train[:, 1, 0] > 0]
+    valid_targets = [int(value) for value in validation[:, 1, 0] > 0]
+    options = dict(layers=(1, 2, 3), task_id=TASK, training_seed=7, profile=_profile(max_epochs=4, patience=5, batch_size=8))
+    in_order = fit_linear_probe(train, targets, validation, valid_targets, **options)
+    pooled = fit_linear_probe(train, targets, validation, valid_targets, processes=2, **options)
+    assert [fit.layer for fit in pooled] == [1, 2, 3]
+    for serial, parallel in zip(in_order, pooled, strict=True):
+        assert parallel.standardizer == serial.standardizer
+        assert parallel.optimizer_steps == serial.optimizer_steps
+        assert [point.weight for point in parallel.checkpoints] == [point.weight for point in serial.checkpoints]
+        # Multithreaded BLAS in this process can round the validation product differently.
+        assert [point.validation_cross_entropy for point in parallel.checkpoints] == pytest.approx(
+            [point.validation_cross_entropy for point in serial.checkpoints], abs=1e-9,
+        )
