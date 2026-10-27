@@ -71,6 +71,9 @@ class ExtractionStore:
         self.staging_root = self.root / "tmp" / "shards"
         self.index_path = self.extraction_root / INDEX_NAME
         self.lock_path = self.extraction_root / ".store.lock"
+        # Manifests that ``lookup`` or ``row_statuses`` verified. Row reads reuse them
+        # instead of checksumming a whole shard for every row they read.
+        self._verified: dict[str, dict[str, Any]] = {}
         self.shard_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
 
@@ -191,7 +194,7 @@ class ExtractionStore:
             shard_id = index["rows"][key]["shard_id"]
             if shard_id not in verified:
                 try:
-                    _sealed_manifest(self.shard_root / shard_id)
+                    self._verified[shard_id] = _sealed_manifest(self.shard_root / shard_id)
                     verified[shard_id] = True
                 except CacheIncompatible:
                     verified[shard_id] = False
@@ -232,6 +235,7 @@ class ExtractionStore:
             directory = self.shard_root / entry["shard_id"]
             if entry["shard_id"] not in manifests:
                 manifests[entry["shard_id"]] = _sealed_manifest(directory)
+                self._verified[entry["shard_id"]] = manifests[entry["shard_id"]]
             manifest = manifests[entry["shard_id"]]
             offset = entry["row_offset"]
             if manifest["row_keys"][offset] != key:
@@ -253,10 +257,18 @@ class ExtractionStore:
             ))
         return tuple(references)
 
+    def _sealed(self, shard_id: str) -> dict[str, Any]:
+        """The manifest a lookup verified, or ``_sealed_manifest`` for a shard read without one."""
+        manifest = self._verified.get(shard_id)
+        if manifest is None:
+            manifest = _sealed_manifest(self.shard_root / shard_id)
+            self._verified[shard_id] = manifest
+        return manifest
+
     def read_residual_row(self, reference: RowReference) -> numpy.ndarray:
         """Memory-map stored residuals for one row. Logits are not opened."""
         directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
+        manifest = self._sealed(reference.shard_id)
         if manifest["layout"] == "equal_width":
             shape = tuple(manifest["residual_shape"])
             mapped = numpy.memmap(directory / "residual.bf16", dtype="<u2", mode="r", shape=shape)
@@ -277,7 +289,7 @@ class ExtractionStore:
     def read_logits_row(self, reference: RowReference) -> numpy.ndarray:
         """Memory-map one stored logit summary (``AB_SUMMARY_FIELDS`` order)."""
         directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
+        manifest = self._sealed(reference.shard_id)
         shape = tuple(manifest["logits_shape"])
         mapped = numpy.memmap(directory / "logits.f32", dtype="<f4", mode="r", shape=shape)
         return numpy.array(mapped[reference.row_offset], dtype=numpy.float32)

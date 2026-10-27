@@ -238,3 +238,24 @@ def test_reporting_settings_and_extraction_exclusions_are_one_list():
 
     assert REPORTING_SETTINGS is EXTRACTION_EXCLUDED_KEYS
     assert "require_confident_on_every_variant" in REPORTING_SETTINGS
+
+
+def test_row_reads_reuse_the_shard_checks_from_lookup(tmp_path, monkeypatch):
+    from knowledge_recovery.cache import store as store_module
+
+    store = ExtractionStore(tmp_path)
+    keys = [_published_key(f"row-{index}") for index in range(4)]
+    store.write_rows([_row(key, scale=float(index + 1)) for index, key in enumerate(keys)])
+    checked = []
+    real = store_module.file_checksum
+    monkeypatch.setattr(store_module, "file_checksum", lambda path: checked.append(path.name) or real(path))
+    references = store.lookup(keys, model_factory=_boom, extraction_command=COMMAND)
+    after_lookup = len(checked)
+    assert after_lookup > 0
+    for reference in references:
+        store.read_logits_row(reference)
+        store.read_residual_row(reference)
+    assert len(checked) == after_lookup
+    # A fresh lookup still checksums the shard again.
+    store.lookup(keys, model_factory=_boom, extraction_command=COMMAND)
+    assert len(checked) == 2 * after_lookup
