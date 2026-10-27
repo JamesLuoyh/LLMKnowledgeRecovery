@@ -41,6 +41,19 @@ _DATASET_PATHS = {
     "correct_answer_path": "base.correct_answer",
     "incorrect_answer_path": "base.incorrect_answer",
 }
+# MMLU keeps the keyed choice and one distractor from the other choices.
+_MMLU_DATASET_PATHS = {
+    "clean_question_path": "question",
+    "correct_answer_path": "choices[answer]",
+    "incorrect_answer_path": "choices[seeded_distractor]",
+}
+# distractor_selection -> the incorrect_answer_path that names it.
+_MMLU_INCORRECT_PATHS = {
+    "seeded_random": "choices[seeded_distractor]",
+    "most_preferred": "choices[most_preferred_incorrect]",
+    "least_preferred": "choices[least_preferred_incorrect]",
+}
+_ADAPTERS = ("sycophancy", "mmlu")
 _DEFINITION_OPTIONAL = (
     "preset",
     "template",
@@ -136,8 +149,8 @@ class ExtractionConfig:
     clean_question_path: str
     correct_answer_path: str
     incorrect_answer_path: str
-    source_filter_field: str
-    source_filter_value: str
+    source_filter_field: str | None
+    source_filter_value: str | None
     chat: bool
     system_message: str | None
     instruction: str
@@ -156,6 +169,9 @@ class ExtractionConfig:
     residual_storage_dtype: str
     logits_storage_dtype: str
     logits_scope: str
+    # Only the mmlu adapter reads these; they are null for sycophancy.
+    distractor_seed: int | None = None
+    distractor_selection: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,7 +190,7 @@ class AnalysisViewConfig:
     agreement_basis: str
     recovery_target: str
     variant_stats: bool = False
-    require_all_variants: bool = False
+    require_confident_on_every_variant: bool = False
 
 
 @dataclass(frozen=True)
@@ -301,6 +317,7 @@ def _extraction(raw: Any) -> ExtractionConfig:
             "incorrect_answer_path",
             "source_row_filter",
         ),
+        ("distractor_seed", "distractor_selection"),
     )
     prompt = _object(
         body["prompt"],
@@ -346,28 +363,67 @@ def _extraction(raw: Any) -> ExtractionConfig:
             "Missing component: that quantization mode. It was not changed to none."
         )
     adapter = _text(dataset["adapter"], "extraction.dataset.adapter")
-    if adapter != "sycophancy":
+    if adapter not in _ADAPTERS:
         raise ConfigurationError(
             f"extraction.dataset.adapter {adapter!r} is not implemented. "
             "Missing component: a dataset adapter for this source. "
             "Clean-question fields will not be guessed."
         )
-    for key, expected in _DATASET_PATHS.items():
+    distractor_selection = None
+    paths = _DATASET_PATHS
+    if adapter == "mmlu":
+        distractor_selection = dataset.get("distractor_selection", "seeded_random")
+        if distractor_selection not in _MMLU_INCORRECT_PATHS:
+            raise ConfigurationError(
+                f"extraction.dataset.distractor_selection {distractor_selection!r} must be one of "
+                f"{', '.join(_MMLU_INCORRECT_PATHS)}"
+            )
+        paths = {**_MMLU_DATASET_PATHS, "incorrect_answer_path": _MMLU_INCORRECT_PATHS[distractor_selection]}
+    for key, expected in paths.items():
         if dataset[key] != expected:
             raise ConfigurationError(
                 f"extraction.dataset.{key} must be {expected!r}. "
                 "No fallback field search is permitted."
             )
-    source_filter = _object(
-        dataset["source_row_filter"],
-        "extraction.dataset.source_row_filter",
-        ("field", "exact_value"),
-    )
-    if source_filter["field"] != "prompt_template" or source_filter["exact_value"] != "{question}":
-        raise ConfigurationError(
-            "extraction.dataset.source_row_filter must keep prompt_template "
-            "exactly equal to '{question}'."
+    if adapter == "mmlu":
+        if dataset["source_row_filter"] is not None:
+            raise ConfigurationError(
+                "extraction.dataset.source_row_filter must be null for mmlu. "
+                "Every source row is a clean question."
+            )
+        if distractor_selection == "seeded_random":
+            if "distractor_seed" not in dataset:
+                raise ConfigurationError(
+                    "extraction.dataset.distractor_seed is required for mmlu seeded_random. "
+                    "It picks the one incorrect choice kept per question."
+                )
+            distractor_seed = _seed(dataset, "distractor_seed", "extraction.dataset")
+        else:
+            if "distractor_seed" in dataset:
+                raise ConfigurationError(
+                    f"extraction.dataset.distractor_seed is unused with {distractor_selection}. "
+                    "The model's preference picks the distractor; remove the seed."
+                )
+            distractor_seed = None
+        source_filter_field = source_filter_value = None
+    else:
+        for key in ("distractor_seed", "distractor_selection"):
+            if key in dataset:
+                raise ConfigurationError(
+                    f"extraction.dataset.{key} applies only to the mmlu adapter"
+                )
+        source_filter = _object(
+            dataset["source_row_filter"],
+            "extraction.dataset.source_row_filter",
+            ("field", "exact_value"),
         )
+        if source_filter["field"] != "prompt_template" or source_filter["exact_value"] != "{question}":
+            raise ConfigurationError(
+                "extraction.dataset.source_row_filter must keep prompt_template "
+                "exactly equal to '{question}'."
+            )
+        distractor_seed = None
+        source_filter_field, source_filter_value = "prompt_template", "{question}"
     if dataset["regenerate_variants"] is not True:
         raise ConfigurationError(
             "extraction.dataset.regenerate_variants must be true. "
@@ -445,11 +501,11 @@ def _extraction(raw: Any) -> ExtractionConfig:
         dataset_split=_text(dataset["split"], "extraction.dataset.split"),
         dataset_revision=_text(dataset["revision"], "extraction.dataset.revision"),
         regenerate_variants=True,
-        clean_question_path="base.question",
-        correct_answer_path="base.correct_answer",
-        incorrect_answer_path="base.incorrect_answer",
-        source_filter_field="prompt_template",
-        source_filter_value="{question}",
+        clean_question_path=paths["clean_question_path"],
+        correct_answer_path=paths["correct_answer_path"],
+        incorrect_answer_path=paths["incorrect_answer_path"],
+        source_filter_field=source_filter_field,
+        source_filter_value=source_filter_value,
         chat=chat,
         system_message=system_message,
         instruction=instruction,
@@ -468,6 +524,8 @@ def _extraction(raw: Any) -> ExtractionConfig:
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
         logits_scope="full_vocabulary",
+        distractor_seed=distractor_seed,
+        distractor_selection=distractor_selection,
     )
 
 
@@ -485,11 +543,16 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
     ))
     if not math.isclose(sum(fractions), 1.0, abs_tol=1e-12):
         raise ConfigurationError("analysis_view.split fractions must sum to 1")
+    if type(body["filter_correct"]) is dict and "require_all_variants" in body["filter_correct"]:
+        raise ConfigurationError(
+            "analysis_view.filter_correct.require_all_variants was renamed to "
+            "require_confident_on_every_variant"
+        )
     chosen = _object(
         body["filter_correct"],
         "analysis_view.filter_correct",
         ("variant", "splits", "min_correct_prob", "paired_orders"),
-        ("variant_stats", "require_all_variants"),
+        ("variant_stats", "require_confident_on_every_variant"),
     )
     if chosen["paired_orders"] is not True:
         raise ConfigurationError("analysis_view.filter_correct.paired_orders must be true")
@@ -498,14 +561,14 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         if "variant_stats" in chosen
         else False
     )
-    require_all_variants = (
-        _bool(chosen, "require_all_variants", "analysis_view.filter_correct")
-        if "require_all_variants" in chosen
+    require_confident_on_every_variant = (
+        _bool(chosen, "require_confident_on_every_variant", "analysis_view.filter_correct")
+        if "require_confident_on_every_variant" in chosen
         else False
     )
-    if require_all_variants and not variant_stats:
+    if require_confident_on_every_variant and not variant_stats:
         raise ConfigurationError(
-            "analysis_view.filter_correct.require_all_variants needs variant_stats: true"
+            "analysis_view.filter_correct.require_confident_on_every_variant needs variant_stats: true"
         )
     analysis = _object(
         body["analysis"],
@@ -539,7 +602,7 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
         agreement_basis="canonical",
         recovery_target="clean_canonical_argmax",
         variant_stats=variant_stats,
-        require_all_variants=require_all_variants,
+        require_confident_on_every_variant=require_confident_on_every_variant,
     )
 
 

@@ -80,6 +80,14 @@ class ExtractionStore:
         keys = tuple(item["row_key"] for item in parsed)
         if any(status != "absent" for status in self.row_statuses(keys).values()):
             raise ValueError("a row key that is already stored is not staged again")
+        return self._stage_parsed(parsed)
+
+    def batched_writer(self, *, flush_every: int) -> BatchedIndexWriter:
+        """Seal shards per call and publish their keys every ``flush_every`` shards."""
+        return BatchedIndexWriter(self, flush_every=flush_every)
+
+    def _stage_parsed(self, parsed: Sequence[Mapping[str, Any]]) -> StagedShard:
+        keys = tuple(item["row_key"] for item in parsed)
         shard_id = checksum_bytes("\n".join(keys).encode())
         directory = self.staging_root / shard_id
         if directory.exists() or (self.shard_root / shard_id).exists():
@@ -285,6 +293,61 @@ class ExtractionStore:
         shape = tuple(manifest["final_norm_shape"])
         mapped = numpy.memmap(directory / "final_norm.bf16", dtype="<u2", mode="r", shape=shape)
         return bf16_to_f32(numpy.array(mapped[reference.row_offset]))
+
+
+class BatchedIndexWriter:
+    """Write many shards without rereading or rewriting the index for each one.
+
+    ``write_rows`` on the store parses the whole index and scans every shard
+    directory per call, which grows with the store. This writer reads the index
+    once, seals each shard with its completion marker immediately, and merges
+    the new keys into a fresh read of the on-disk index every ``flush_every``
+    shards and on exit. A crash between flushes leaves sealed, unindexed
+    shards, which the next lookup reports as ``complete_unindexed`` and
+    ``commit_index`` publishes. Keys sealed by another process after this
+    writer started are not seen; run one writer per store.
+    """
+
+    def __init__(self, store: ExtractionStore, *, flush_every: int) -> None:
+        if type(flush_every) is not int or flush_every < 1:
+            raise ValueError("flush_every must be a positive integer")
+        self.store = store
+        self.flush_every = flush_every
+        self.known = set(_read_index(store.index_path)["rows"])
+        self.unpublished: dict[str, dict[str, Any]] = {}
+        self.shards_since_flush = 0
+
+    def __enter__(self) -> BatchedIndexWriter:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.flush()
+
+    def write_rows(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        """Seal rows whose keys are not stored yet. References come from ``lookup`` after a flush."""
+        parsed = [item for item in _rows(rows) if item["row_key"] not in self.known]
+        if not parsed:
+            return
+        with self.store._exclusive_lock():
+            staged = self.store._stage_parsed(parsed)
+            self.store.complete_shard(staged)
+        for offset, key in enumerate(staged.row_keys):
+            self.unpublished[key] = {"shard_id": staged.shard_id, "row_offset": offset}
+            self.known.add(key)
+        self.shards_since_flush += 1
+        if self.shards_since_flush >= self.flush_every:
+            self.flush()
+
+    def flush(self) -> None:
+        """Merge unpublished keys into the on-disk index under the store lock."""
+        if not self.unpublished:
+            return
+        with self.store._exclusive_lock():
+            index = _read_index(self.store.index_path)
+            index["rows"].update(self.unpublished)
+            _atomic_bytes(self.store.index_path, _dumps(index).encode())
+        self.unpublished.clear()
+        self.shards_since_flush = 0
 
 
 def _rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

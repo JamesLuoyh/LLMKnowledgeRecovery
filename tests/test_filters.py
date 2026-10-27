@@ -3,7 +3,7 @@ import json
 import pytest
 
 from knowledge_recovery.provenance import content_digest
-from knowledge_recovery.views import CleanOrder, apply_filter_gate, apply_variant_gate
+from knowledge_recovery.views import CleanOrder, apply_filter_gate, apply_variant_gate, write_misreport_report
 
 
 def _order(group, split, order_id, canonical, *, invalid=False, raw=(0.1, 0.1)):
@@ -174,12 +174,12 @@ def test_variant_gate_counts_three_steps_on_the_pool_without_a_correct_label(tmp
     text = (tmp_path / "variant_filter_report.txt").read_text()
     assert "Variant: T-C" in text and "Variant: T-IC" in text
     assert "Pool: base questions that passed the clean filter (3 questions, 6 rows per variant)" in text
-    assert "Final filter across all variants: not applied" in text
+    assert "Final filter (confident on every variant): not applied" in text
 
 
-def test_require_all_keeps_questions_that_pass_every_variant(tmp_path):
+def test_require_confident_on_every_variant_keeps_questions_that_pass_every_variant(tmp_path):
     outcome = apply_variant_gate(
-        _variant_fixture(), ["q1", "q2", "q3"], output_directory=tmp_path, require_all=True
+        _variant_fixture(), ["q1", "q2", "q3"], output_directory=tmp_path, require_confident_on_every_variant=True
     )
     assert outcome.eligible_base_group_ids == ("q1",)
     final = _variant_record(tmp_path)["population_counts"]["final"]
@@ -187,7 +187,7 @@ def test_require_all_keeps_questions_that_pass_every_variant(tmp_path):
     assert final["by_split"]["train"] == {"base_questions": 1, "prompt_rows_per_variant": 2}
     assert final["by_split"]["val"] == {"base_questions": 0, "prompt_rows_per_variant": 0}
     text = (tmp_path / "variant_filter_report.txt").read_text()
-    assert "Final (all variants)" in text
+    assert "Final (confident on every variant)" in text
     assert "Kept: questions that passed step 3 on T-C, T-IC" in text
 
 
@@ -198,3 +198,71 @@ def test_variant_gate_requires_every_pool_question(tmp_path):
         apply_variant_gate(fixture, ["q1", "q2", "q3"], output_directory=tmp_path)
     with pytest.raises(ValueError, match="missing T-C orders"):
         apply_variant_gate({"T-C": fixture["T-C"][:1]}, ["q1"], output_directory=tmp_path)
+
+
+def _misreport_fixture():
+    """Clean passes on q_pass and q_pass2 only. T-IC flips four rows; T-C matches clean everywhere."""
+    clean = [
+        _order("q_pass", "train", "correct_at_A", (0.9, 0.1)),
+        _order("q_pass", "train", "correct_at_B", (0.1, 0.9)),
+        _order("q_pass2", "train", "correct_at_A", (0.95, 0.05)),
+        _order("q_pass2", "train", "correct_at_B", (0.05, 0.95)),
+        _order("q_wrong", "val", "correct_at_A", (0.1, 0.9)),
+        _order("q_wrong", "val", "correct_at_B", (0.1, 0.9)),
+        _order("q_inv", "test", "correct_at_A", (0.9, 0.1), invalid=True),
+        _order("q_inv", "test", "correct_at_B", (0.6, 0.4)),
+    ]
+    variants = {
+        # q_pass's correct_at_B sits exactly on the threshold, so T-IC drops q_pass at the pair step.
+        "T-IC": [
+            _order("q_pass", "train", "correct_at_A", (0.1, 0.9)),
+            _order("q_pass", "train", "correct_at_B", (0.2, 0.8)),
+            _order("q_pass2", "train", "correct_at_A", (0.1, 0.9)),
+            _order("q_pass2", "train", "correct_at_B", (0.1, 0.9)),
+            _order("q_wrong", "val", "correct_at_A", (0.9, 0.1)),
+            _order("q_wrong", "val", "correct_at_B", (0.1, 0.9)),
+            _order("q_inv", "test", "correct_at_A", (0.1, 0.9)),
+            _order("q_inv", "test", "correct_at_B", (0.5, 0.5)),
+        ],
+        "T-C": clean,
+    }
+    return clean, variants
+
+
+def test_misreport_report_counts_flips_after_every_step(tmp_path):
+    clean, variants = _misreport_fixture()
+    report = write_misreport_report(
+        clean, variants, output_directory=tmp_path, variant_steps=True, require_confident_on_every_variant=True
+    )
+    assert json.loads((tmp_path / "misreport_report.json").read_text()) == report
+    cells = report["counts"]["T-IC"]["overall"]["both_orders"]
+    assert {step: (cell["misreports"], cell["rows"]) for step, cell in cells.items()} == {
+        "before": (4, 8),
+        "after_clean_greedy_is_option": (3, 7),
+        "after_clean_option_probability": (3, 6),
+        "after_clean_greedy_correct": (2, 5),
+        "after_clean_both_orders_correct": (2, 4),
+        "after_variant_greedy_is_option": (2, 4),
+        "after_variant_option_probability": (2, 3),
+        "after_variant_both_orders_confident": (1, 2),
+        "after_confident_on_every_variant": (1, 2),
+    }
+    assert report["counts"]["T-IC"]["by_split"]["val"]["correct_at_A"]["before"] == {
+        "rows": 1, "misreports": 1,
+    }
+    t_c = report["counts"]["T-C"]["overall"]["both_orders"]
+    assert all(cell["misreports"] == 0 for cell in t_c.values())
+    assert t_c["after_confident_on_every_variant"]["rows"] == 2
+    text = (tmp_path / "misreport_report.txt").read_text()
+    assert "Variant: T-IC | Overall" in text
+    assert "  before: 4/8 (0.500)" in text
+
+
+def test_misreport_report_without_variant_steps_stops_at_the_clean_filter(tmp_path):
+    clean, variants = _misreport_fixture()
+    report = write_misreport_report(clean, variants, output_directory=tmp_path)
+    assert report["steps"][-1] == "after_clean_both_orders_correct"
+    with pytest.raises(ValueError, match="require_confident_on_every_variant needs variant_steps"):
+        write_misreport_report(clean, variants, output_directory=tmp_path, require_confident_on_every_variant=True)
+    with pytest.raises(ValueError, match="does not cover the same questions"):
+        write_misreport_report(clean, {"T-IC": variants["T-IC"][:6]}, output_directory=tmp_path)

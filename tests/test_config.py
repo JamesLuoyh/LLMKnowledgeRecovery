@@ -225,21 +225,25 @@ def test_assets_are_checked_before_work(tmp_path):
 def test_variant_filter_flags_default_off_and_the_final_filter_needs_stats(tmp_path):
     shipped = _shipped().analysis_view
     assert shipped.variant_stats is True
-    assert shipped.require_all_variants is False
+    assert shipped.require_confident_on_every_variant is False
     omitted = _document()
     del omitted["analysis_view"]["filter_correct"]["variant_stats"]
-    del omitted["analysis_view"]["filter_correct"]["require_all_variants"]
+    del omitted["analysis_view"]["filter_correct"]["require_confident_on_every_variant"]
     view = _load(omitted, tmp_path).analysis_view
-    assert (view.variant_stats, view.require_all_variants) == (False, False)
+    assert (view.variant_stats, view.require_confident_on_every_variant) == (False, False)
     dependent = _document()
     dependent["analysis_view"]["filter_correct"]["variant_stats"] = False
-    dependent["analysis_view"]["filter_correct"]["require_all_variants"] = True
-    with pytest.raises(ConfigurationError, match="require_all_variants needs variant_stats"):
+    dependent["analysis_view"]["filter_correct"]["require_confident_on_every_variant"] = True
+    with pytest.raises(ConfigurationError, match="require_confident_on_every_variant needs variant_stats"):
         _load(dependent, tmp_path)
     loose = _document()
     loose["analysis_view"]["filter_correct"]["variant_stats"] = "yes"
     with pytest.raises(ConfigurationError, match="variant_stats must be an explicit boolean"):
         _load(loose, tmp_path)
+    renamed = _document()
+    renamed["analysis_view"]["filter_correct"]["require_all_variants"] = True
+    with pytest.raises(ConfigurationError, match="renamed to require_confident_on_every_variant"):
+        _load(renamed, tmp_path)
 
 
 def test_empty_eval_variants_mean_no_ood_view(tmp_path):

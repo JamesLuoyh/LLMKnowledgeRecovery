@@ -20,6 +20,9 @@ from knowledge_recovery.cache.store import ExtractionStore, RowReference
 from knowledge_recovery.errors import CacheIncomplete, CacheIncompatible, KnowledgeRecoveryError
 from knowledge_recovery.models.base import freeze_model
 
+# Sealed shards between on-disk index writes. Unflushed shards are recovered on resume.
+INDEX_FLUSH_SHARDS = 1000
+
 RowFactory = Callable[[], object]
 ForwardBatch = Callable[..., Sequence[Mapping[str, Any]]]
 
@@ -138,9 +141,13 @@ def _compute_missing(
 ) -> tuple[int, ...]:
     sizes: list[int] = []
     size = batch_size
-    with tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress:
-        while pending:
-            chunk = pending[:size]
+    start = 0
+    with (
+        store.batched_writer(flush_every=INDEX_FLUSH_SHARDS) as writer,
+        tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress,
+    ):
+        while start < len(pending):
+            chunk = pending[start:start + size]
             try:
                 produced = forward_batch(model, chunk, batch_size=size, precision=precision)
             except BatchExceededMemory:
@@ -153,9 +160,9 @@ def _compute_missing(
             store_rows = []
             for row, item in zip(chunk, produced, strict=True):
                 store_rows.append(_store_row(str(row["row_key"]), item, precision, size, execution_backend))
-            store.write_rows(store_rows)
+            writer.write_rows(store_rows)
             sizes.append(size)
-            pending = pending[len(chunk):]
+            start += len(chunk)
             progress.update(len(chunk))
             progress.set_postfix(batch=size)
     return tuple(sizes)

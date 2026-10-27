@@ -69,11 +69,13 @@ analysis_view:
     paired_orders: true
     # Three-step counts per intervened variant over the clean-filtered pool. Report only.
     variant_stats: true
-    # Keep only questions that pass on every intervened variant. Needs variant_stats.
-    require_all_variants: false
+    # Drop questions where any intervened variant, in either order, gives a non-A/B greedy
+    # token or an A/B probability at or below min_correct_prob. The answer may be wrong.
+    # Needs variant_stats.
+    require_confident_on_every_variant: true
   analysis:
-    train_variants: [clean, T-C, T-IC]
-    eval_variants: [NT-C, NT-IC]
+    train_variants: [clean, T-C, T-IC, NT-C, NT-IC]
+    eval_variants: []
     agreement_basis: canonical
     recovery_target: clean_canonical_argmax
 
