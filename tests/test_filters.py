@@ -266,3 +266,15 @@ def test_misreport_report_without_variant_steps_stops_at_the_clean_filter(tmp_pa
         write_misreport_report(clean, variants, output_directory=tmp_path, require_confident_on_every_variant=True)
     with pytest.raises(ValueError, match="does not cover the same questions"):
         write_misreport_report(clean, {"T-IC": variants["T-IC"][:6]}, output_directory=tmp_path)
+
+
+def test_the_report_digest_does_not_depend_on_the_output_directory(tmp_path):
+    first = apply_filter_gate(_fixture(), output_directory=tmp_path / "a")
+    moved = apply_filter_gate(_fixture(), output_directory=tmp_path / "elsewhere" / "b")
+    assert moved.report_digest == first.report_digest
+    payload = json.loads((tmp_path / "a" / "filter_report.json").read_text())
+    assert "paths" not in payload["record"]
+    assert payload["paths"] == {"directory": str(tmp_path / "a"), "json": "filter_report.json", "text": "filter_report.txt"}
+    pool = ["q1", "q2", "q3"]
+    variant = apply_variant_gate(_variant_fixture(), pool, output_directory=tmp_path / "a")
+    assert apply_variant_gate(_variant_fixture(), pool, output_directory=tmp_path / "c").report_digest == variant.report_digest

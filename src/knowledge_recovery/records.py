@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from types import MappingProxyType
 from typing import Any, ClassVar
 
@@ -14,6 +14,8 @@ SCHEMA_VERSION = 1
 VIEW_ROLES = ("train", "validation", "evaluation")
 # These names are execution or analysis settings. They are recorded on their
 # own artifacts and are rejected if they appear inside an extraction identity.
+# ``cache_row_key`` accepts exactly these as reporting settings, so a renamed
+# analysis setting is added here once.
 EXTRACTION_EXCLUDED_KEYS = frozenset({
     "run_id",
     "eval_id",
@@ -24,9 +26,17 @@ EXTRACTION_EXCLUDED_KEYS = frozenset({
     "hostname",
     "ece_bins",
     "ece",
+    "calibration_bins",
     "probe_seed",
     "training_seed",
+    "filter_threshold",
+    "min_correct_prob",
+    "variant_stats",
+    "require_confident_on_every_variant",
     "probability_basis",
+    "ood_variants",
+    "test_variants",
+    "loss",
     "timestamp",
     "processing_order",
 })
@@ -102,7 +112,6 @@ class Record:
 
     kind: ClassVar[str]
     schema: ClassVar[int] = SCHEMA_VERSION
-    omit_if_none: ClassVar[tuple[str, ...]] = ()
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -114,14 +123,58 @@ class Record:
         """Override to reject content that would name the wrong artifact."""
 
     def payload(self) -> dict[str, Any]:
-        """Kind, schema, and fields. Inapplicable optional fields are omitted."""
+        """Kind, schema, and fields. A field equal to its declared default is omitted.
+
+        A field added later with a default therefore leaves earlier digests
+        unchanged. A default must never change once released; change the
+        record's schema instead.
+        """
         body: dict[str, Any] = {"kind": self.kind, "schema": self.schema}
         for item in fields(self):
             value = getattr(self, item.name)
-            if value is None and item.name in self.omit_if_none:
+            if _is_default(item, value):
                 continue
             body[item.name] = value
         return body
+
+
+def non_default_fields(instance: Any, names: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Dataclass fields that differ from their declared defaults, by name.
+
+    ``names`` limits the result to those fields. Use this instead of ``vars``
+    when a configuration object enters a digest.
+    """
+    chosen = [item for item in fields(instance) if names is None or item.name in names]
+    if names is not None and len(chosen) != len(names):
+        raise ValueError(f"{type(instance).__name__} has no field among {', '.join(names)}")
+    return {
+        item.name: getattr(instance, item.name)
+        for item in chosen
+        if not _is_default(item, freeze(getattr(instance, item.name)))
+    }
+
+
+def _is_default(item: Any, value: Any) -> bool:
+    if item.default is not MISSING:
+        default = item.default
+    elif item.default_factory is not MISSING:
+        default = item.default_factory()
+    else:
+        return False
+    return same_value(value, freeze(default))
+
+
+def same_value(left: Any, right: Any) -> bool:
+    """Equality of frozen values that keeps the distinctions canonical JSON keeps."""
+    if type(left) is not type(right):
+        return False
+    if type(left) is float:
+        return repr(left) == repr(right)
+    if type(left) is tuple:
+        return len(left) == len(right) and all(same_value(a, b) for a, b in zip(left, right))
+    if type(left) is MappingProxyType:
+        return left.keys() == right.keys() and all(same_value(left[key], right[key]) for key in left)
+    return left == right
 
 
 def record(kind: str):
@@ -391,11 +444,6 @@ class ProbeTraining(Record):
 class EvaluationIdentity(Record):
     """Scoring identity of a saved method state. Output paths are not fields."""
 
-    omit_if_none = (
-        "transform_digest",
-        "selection_manifest_digest",
-        "uncertainty",
-    )
     method_state_digest: str
     evaluation_view_id: str
     prediction_convention: Any
@@ -630,7 +678,6 @@ class FilterReport(Record):
     population_counts: Mapping[str, Any]
     split_denominators: Mapping[str, Any]
     canonical_only_diagnostics: Mapping[str, Any]
-    paths: Mapping[str, Any]
 
     def validate(self) -> None:
         for label in (
@@ -639,7 +686,6 @@ class FilterReport(Record):
             "population_counts",
             "split_denominators",
             "canonical_only_diagnostics",
-            "paths",
         ):
             _mapping(getattr(self, label), label)
 

@@ -346,3 +346,41 @@ def test_the_logits_scope_enters_the_row_key():
     assert build_row_key(**common, logits_scope="ab_summary") != full
     with pytest.raises(ValueError, match="logits_scope must be one of"):
         build_row_key(**common, logits_scope="top_k")
+
+
+def test_library_versions_and_gpu_model_stay_out_of_the_row_key():
+    from knowledge_recovery.extraction.identity import build_row_key
+
+    runtime = {
+        "backend": "torch",
+        "torch_version": "2.4.0",
+        "transformers_version": "4.44.0",
+        "numpy_version": "1.26.4",
+        "device_type": "cuda",
+        "device_name": "NVIDIA A100",
+        "device_capability": [8, 0],
+        "attention_backend": "sdpa",
+        "execution_precision": "bf16",
+    }
+    common = {
+        "model_signature": _key("model"),
+        "input_ids": [1, 2, 3],
+        "attention_mask": [1, 1, 1],
+        "prompt_contract_digest": _key("contract"),
+        "selected_position": 2,
+        "execution_precision": "bf16",
+        "attention_backend": "sdpa",
+        "logits_scope": "ab_summary",
+    }
+    key = build_row_key(**common, numeric_runtime_signature=runtime)
+    upgraded = {
+        **runtime,
+        "torch_version": "2.6.0",
+        "transformers_version": "4.50.0",
+        "numpy_version": "2.1.0",
+        "device_name": "NVIDIA H100",
+        "device_capability": [9, 0],
+    }
+    assert build_row_key(**common, numeric_runtime_signature=upgraded) == key
+    for field, value in (("backend", "integration_mock"), ("device_type", "cpu"), ("attention_backend", "eager")):
+        assert build_row_key(**common, numeric_runtime_signature={**runtime, field: value}) != key

@@ -72,7 +72,7 @@ from knowledge_recovery.prompts.token_audit import (
     write_token_audit,
 )
 from knowledge_recovery.provenance import canonical_json, content_digest, identify, model_signature, prompt_contract, run_id
-from knowledge_recovery.records import PromptRecord
+from knowledge_recovery.records import PromptRecord, non_default_fields
 from knowledge_recovery.reports.export import export_report
 from knowledge_recovery.tasks import awareness_task_spec, consistency_task_spec
 from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
@@ -1089,8 +1089,7 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "name": extraction.dataset_name,
             "split": extraction.dataset_split,
             "revision": extraction.dataset_revision,
-            "distractor_seed": extraction.distractor_seed,
-            "distractor_selection": extraction.distractor_selection,
+            **non_default_fields(extraction, ("distractor_seed", "distractor_selection")),
         },
         "prompt": {
             "chat": extraction.chat,
@@ -1100,7 +1099,7 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "verbalizers": list(extraction.verbalizers),
             "selector": extraction.selector,
         },
-        "interventions": [_plain(vars(item)) for item in extraction.interventions],
+        "interventions": [_plain(non_default_fields(item)) for item in extraction.interventions],
         "prepared_identity": prepared_identity,
         "logits_scope": extraction.logits_scope,
     })

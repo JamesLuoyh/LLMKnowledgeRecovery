@@ -23,6 +23,10 @@ SAVED_REPRESENTATIONS = (
     "final_normalized_state",
     "full_vocabulary_logits",
 )
+# Runtime facts that change the stored numbers. Library versions, the GPU model,
+# and its compute capability are recorded on the collection manifest instead,
+# so an upgrade or a different card reuses existing rows.
+ROW_KEY_RUNTIME_FIELDS = ("backend", "device_type", "attention_backend", "execution_precision")
 # logits_scope -> saved representation kinds.
 _REPRESENTATIONS_BY_SCOPE = {
     "full_vocabulary": SAVED_REPRESENTATIONS,
@@ -78,7 +82,7 @@ def build_row_key(
             "augmentation": False,
             "seeded_inference": False,
         },
-        numeric_runtime_signature=dict(numeric_runtime_signature),
+        numeric_runtime_signature=row_key_runtime(numeric_runtime_signature),
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
         tensor_schema_version=TENSOR_SCHEMA_VERSION,
@@ -89,3 +93,10 @@ def build_row_key(
         extraction_signature=extraction.digest,
         reporting=reporting,
     )
+
+
+def row_key_runtime(signature: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of a resolved runtime signature that enters the row key."""
+    if not isinstance(signature, Mapping):
+        raise TypeError("numeric_runtime_signature must be a mapping")
+    return {key: signature[key] for key in ROW_KEY_RUNTIME_FIELDS if key in signature}

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -112,22 +112,26 @@ LINEAR_V1 = LinearV1(
 
 @dataclass(frozen=True)
 class InterventionDefinition:
-    """One configured variant. Absent optional fields stay null."""
+    """One configured variant. Absent optional fields keep their defaults.
+
+    The extraction request signature leaves out fields equal to their default,
+    so a new optional field must default to its old implicit behavior.
+    """
 
     id: str
     provider: str
-    preset: str | None
-    template: str | None
-    source: str | None
-    join_on: str | None
-    text_field: str | None
-    instance_field: str | None
     placement: Any
-    pairing: str | None
-    on_missing: str | None
-    family: str | None
-    tags: tuple[str, ...]
-    parameters: Mapping[str, Any]
+    preset: str | None = None
+    template: str | None = None
+    source: str | None = None
+    join_on: str | None = None
+    text_field: str | None = None
+    instance_field: str | None = None
+    pairing: str | None = None
+    on_missing: str | None = None
+    family: str | None = None
+    tags: tuple[str, ...] = ()
+    parameters: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

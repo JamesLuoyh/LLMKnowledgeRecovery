@@ -228,3 +228,11 @@ def test_a_row_without_its_final_norm_is_not_stored(tmp_path):
     del row["final_normalized"]
     with pytest.raises(ValueError, match="final normalized state"):
         store.write_rows([row])
+
+
+def test_reporting_settings_and_extraction_exclusions_are_one_list():
+    from knowledge_recovery.cache import REPORTING_SETTINGS
+    from knowledge_recovery.records import EXTRACTION_EXCLUDED_KEYS
+
+    assert REPORTING_SETTINGS is EXTRACTION_EXCLUDED_KEYS
+    assert "require_confident_on_every_variant" in REPORTING_SETTINGS

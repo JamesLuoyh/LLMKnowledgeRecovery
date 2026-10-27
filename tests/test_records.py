@@ -255,7 +255,6 @@ def test_remaining_records_keep_their_kind_and_sequence_order():
         population_counts={"rows": 2},
         split_denominators={"train": 1},
         canonical_only_diagnostics={"retained": 0},
-        paths={"report": "analyses/report.json"},
     )
     task = TaskSpec(
         task_id="agreement",
@@ -344,3 +343,38 @@ def test_remaining_records_keep_their_kind_and_sequence_order():
             invalid_label=False,
             scoring_version="score-1",
         )
+
+
+def test_a_field_equal_to_its_default_is_left_out_of_the_digest():
+    from dataclasses import dataclass, field
+
+    from knowledge_recovery.records import non_default_fields, record
+
+    @record("compat_probe")
+    class Before(Record):
+        name: str
+
+    @record("compat_probe")
+    class After(Record):
+        name: str
+        tags: tuple[str, ...] = ()
+        weight: float = 0.0
+        flag: bool = False
+
+    assert identify(After(name="x")).digest == identify(Before(name="x")).digest
+    assert identify(After(name="x", tags=("t",))).digest != identify(Before(name="x")).digest
+    # Type and sign stay distinct, as in canonical JSON.
+    assert "weight" in After(name="x", weight=-0.0).payload()
+    assert "flag" in After(name="x", flag=0).payload()
+
+    @dataclass(frozen=True)
+    class Config:
+        id: str
+        seed: int | None = None
+        parameters: dict = field(default_factory=dict)
+
+    assert non_default_fields(Config(id="a")) == {"id": "a"}
+    assert non_default_fields(Config(id="a", seed=0)) == {"id": "a", "seed": 0}
+    assert non_default_fields(Config(id="a", parameters={"k": 1}), ("seed", "parameters")) == {"parameters": {"k": 1}}
+    with pytest.raises(ValueError, match="no field"):
+        non_default_fields(Config(id="a"), ("missing",))

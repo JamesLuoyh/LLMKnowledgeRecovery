@@ -12,33 +12,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from knowledge_recovery.provenance import extraction_row_key
+from knowledge_recovery.records import EXTRACTION_EXCLUDED_KEYS
 
 # Recorded on analysis, run, or evaluation artifacts. None of these is an
-# input to ``cache_row_key``.
-REPORTING_SETTINGS = (
-    "run_id",
-    "eval_id",
-    "evaluation_id",
-    "split_seed",
-    "split_ratio",
-    "training_seed",
-    "probe_seed",
-    "batch_size",
-    "hostname",
-    "ece_bins",
-    "ece",
-    "calibration_bins",
-    "filter_threshold",
-    "min_correct_prob",
-    "variant_stats",
-    "require_confident_on_every_variant",
-    "probability_basis",
-    "ood_variants",
-    "test_variants",
-    "loss",
-    "timestamp",
-    "processing_order",
-)
+# input to ``cache_row_key``. The one list lives beside the extraction records.
+REPORTING_SETTINGS = EXTRACTION_EXCLUDED_KEYS
 
 
 def cache_row_key(
