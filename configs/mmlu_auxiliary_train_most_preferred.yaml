@@ -1,0 +1,100 @@
+# MMLU all/auxiliary_train contract, using the sycophancy variants. Each object has schema_version 1.
+# Each four-choice row keeps the keyed answer and the model's most preferred incorrect choice (kr rank-distractors).
+# rows.json comes from scripts/export_mmlu.py on the cais/mmlu parquet snapshot below.
+# min_correct_prob is a strict lower bound on the greedy option's normalized probability.
+extraction:
+  schema_version: 1
+  storage:
+    root: /research/projects/ecoai/LLMKnowledgeRecovery/mmlu_most_preferred
+  assets:
+    offline: true
+    allow_download: false
+    model_path: /research/projects/ecoai/gks43/hf_cache/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
+    dataset_path: /research/projects/ecoai/LLMKnowledgeRecovery/datasets/mmlu_auxiliary_train/rows.json
+  model:
+    name: Qwen/Qwen2.5-7B-Instruct
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    tokenizer_revision: a09a35458c702b33eeacc393d103063234e8bc28
+    precision: bf16
+    quantization: none
+  dataset:
+    adapter: mmlu
+    name: cais/mmlu
+    split: all/auxiliary_train
+    revision: c30699e8356da336a370243923dbaf21066bb9fe
+    regenerate_variants: true
+    clean_question_path: question
+    correct_answer_path: choices[answer]
+    incorrect_answer_path: choices[most_preferred_incorrect]
+    source_row_filter: null
+    distractor_selection: most_preferred
+  prompt:
+    chat: true
+    system_message: "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+    instruction: "Answer with exactly one letter. Do not include any other text."
+  interventions:
+    registry: builtin_and_configured
+    default_placement: after_options_before_instruction
+    preset_placeholder_source: answer_text
+    definitions:
+      - {id: clean, provider: identity}
+      - {id: T-C, provider: template, preset: sycophancy_T_C}
+      - {id: NT-C, provider: template, preset: sycophancy_NT_C}
+      - {id: T-IC, provider: template, preset: sycophancy_T_IC}
+      - {id: NT-IC, provider: template, preset: sycophancy_NT_IC}
+  answers:
+    mode: mcqa
+    labels: [A, B]
+    verbalizers: ["A", "B"]
+    token_audit: null
+  internals:
+    selector: last_nonpadding_input_token
+    layers: all_transformer_blocks
+    representation: post_block_pre_final_norm
+    save_final_normalized_state: true
+    residual_storage_dtype: bf16
+    logits_storage_dtype: float32
+
+analysis_view:
+  schema_version: 1
+  split:
+    train_fraction: 0.6
+    val_fraction: 0.2
+    test_fraction: 0.2
+    seed: 42
+  filter_correct:
+    variant: clean
+    splits: [train, val, test]
+    min_correct_prob: 0.8
+    paired_orders: true
+    # Three-step counts per intervened variant over the clean-filtered pool. Report only.
+    variant_stats: true
+    # Drop questions where any intervened variant, in either order, gives a non-A/B greedy
+    # token or an A/B probability at or below min_correct_prob. The answer may be wrong.
+    # Needs variant_stats.
+    require_confident_on_every_variant: true
+  analysis:
+    train_variants: [clean, T-C, T-IC, NT-C, NT-IC]
+    eval_variants: []
+    agreement_basis: canonical
+    recovery_target: clean_canonical_argmax
+
+probe_run:
+  schema_version: 1
+  probe:
+    architecture: layerwise_linear
+    loss: binary_cross_entropy
+    positive_class_awareness: agreement
+    positive_class_consistency: B
+    training_seed: 42
+    selection_metric: validation_cross_entropy
+    default_profile: linear_v1
+  methods:
+    behavioral_awareness: [linear_agreement, training_frequency]
+    knowledge_consistency: [linear_clean_answer, contextual_answer]
+  evaluation:
+    brier_convention: scalar_positive_class
+    ece_bins: 15
+    summaries: [per_variant, per_correct_position, pooled_by_domain]
+    confidence_intervals: false
+    save_per_example_predictions: true
