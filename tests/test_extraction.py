@@ -112,7 +112,7 @@ def test_a_block_tuple_contributes_its_first_element_only():
     assert captured.logits[0, 0] == 8
 
 
-def test_storage_dtypes_and_separate_final_norm(tmp_path):
+def test_storage_dtypes_without_the_final_norm(tmp_path):
     store = ExtractionStore(tmp_path)
     key = _key("stored")
     references = store.write_rows([{"row_key": key, **_produced()}])
@@ -120,9 +120,7 @@ def test_storage_dtypes_and_separate_final_norm(tmp_path):
     logits_file = tmp_path / "extractions" / "shards" / references[0].shard_id / "logits.f32"
     assert numpy.fromfile(residual_file, dtype="<u2").size > 0
     assert numpy.fromfile(logits_file, dtype="<f4").dtype == numpy.float32
-    final = store.read_final_norm_row(references[0])
-    residual = store.read_residual_row(references[0])
-    assert not numpy.array_equal(final, residual[-1])
+    assert not (residual_file.parent / "final_norm.bf16").exists()
     assert store.read_logits_row(references[0]).dtype == numpy.float32
 
 

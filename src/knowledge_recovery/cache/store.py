@@ -95,8 +95,6 @@ class ExtractionStore:
         directory.mkdir()
         spec = _write_tensors(directory, parsed)
         manifest = shard_manifest(row_keys=keys, checksums=_checksums(directory, spec["files"]), **spec["manifest"])
-        if spec["final_norm_shape"] is not None:
-            manifest["final_norm_shape"] = spec["final_norm_shape"]
         payload = _dumps(manifest).encode()
         (directory / "manifest.json").write_bytes(payload)
         _verify_files(directory, manifest)
@@ -284,14 +282,6 @@ class ExtractionStore:
         mapped = numpy.memmap(directory / "logits.f32", dtype="<f4", mode="r", shape=shape)
         return numpy.array(mapped[reference.row_offset], dtype=numpy.float32)
 
-    def read_final_norm_row(self, reference: RowReference) -> numpy.ndarray:
-        """Memory-map the separately stored final norm for one row."""
-        directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
-        shape = tuple(manifest["final_norm_shape"])
-        mapped = numpy.memmap(directory / "final_norm.bf16", dtype="<u2", mode="r", shape=shape)
-        return bf16_to_f32(numpy.array(mapped[reference.row_offset]))
-
 
 class BatchedIndexWriter:
     """Write many shards without rereading or rewriting the index for each one.
@@ -362,16 +352,10 @@ def _rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         logits = numpy.asarray(row.get("logits"), dtype=numpy.float32)
         if logits.ndim != 1 or logits.shape[0] < 1:
             raise ValueError("logits must be a full-vocabulary vector")
-        if row.get("final_normalized") is None:
-            raise ValueError("every row stores its final normalized state")
-        final = numpy.asarray(row["final_normalized"], dtype=numpy.float32)
-        if final.ndim != 1:
-            raise ValueError("final normalized state is one vector per row")
         parsed.append({
             "row_key": key,
             "residuals": residuals,
             "logits": logits,
-            "final_normalized": final,
         })
     return parsed
 
@@ -416,21 +400,7 @@ def _write_tensors(directory: Path, rows: Sequence[Mapping[str, Any]]) -> dict[s
             "logits_shape": list(logits.shape),
             "files": files,
         }
-    final_shape = _write_final_norm(directory, rows, files)
-    return {"files": files, "manifest": manifest, "final_norm_shape": final_shape}
-
-
-def _write_final_norm(
-    directory: Path,
-    rows: Sequence[Mapping[str, Any]],
-    files: dict[str, dict[str, Any]],
-) -> list[int]:
-    """Store the final norm beside the block residuals. It is not a layer column."""
-    stacked = numpy.stack([numpy.asarray(row["final_normalized"], dtype=numpy.float32) for row in rows])
-    name = "final_norm.bf16"
-    numpy.ascontiguousarray(f32_to_bf16(stacked), dtype="<u2").tofile(directory / name)
-    files[name] = {"dtype": RESIDUAL_DTYPE, "shape": list(stacked.shape)}
-    return list(stacked.shape)
+    return {"files": files, "manifest": manifest}
 
 
 def _checksums(directory: Path, files: Mapping[str, Any]) -> dict[str, str]:

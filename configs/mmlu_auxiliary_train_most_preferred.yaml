@@ -51,7 +51,7 @@ extraction:
     selector: last_nonpadding_input_token
     layers: all_transformer_blocks
     representation: post_block_pre_final_norm
-    save_final_normalized_state: true
+    save_final_normalized_state: false
     residual_storage_dtype: bf16
     logits_storage_dtype: float32
 

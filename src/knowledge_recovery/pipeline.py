@@ -72,7 +72,7 @@ from knowledge_recovery.prompts.token_audit import (
     write_token_audit,
 )
 from knowledge_recovery.provenance import canonical_json, content_digest, identify, model_signature, prompt_contract, run_id
-from knowledge_recovery.records import PromptRecord, non_default_fields
+from knowledge_recovery.records import non_default_fields
 from knowledge_recovery.reports.export import export_report
 from knowledge_recovery.tasks import awareness_task_spec, consistency_task_spec
 from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
@@ -1021,11 +1021,11 @@ def _audit(config: ExperimentConfig, *, recheck: bool):
         config_path=_config_token(config.path),
     )
     write_token_audit(storage / "audits", audit)
-    _tokenize(config, audit)
     return audit
 
 
 def _tokenize(config: ExperimentConfig, audit) -> list[dict[str, Any]]:
+    """Token ids per rendered prompt, kept in memory. The row keys record them."""
     storage = _storage(config)
     rendered = json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
     tokenizer = _tokenizer(Path(config.extraction.model_path))
@@ -1039,33 +1039,13 @@ def _tokenize(config: ExperimentConfig, audit) -> list[dict[str, Any]]:
         input_ids = list(tokenizer.encode_prompt(example))
         mask = [1] * len(input_ids)
         position = last_nonpadding_index(mask)
-        blocks = dict(row["blocks"])
-        blocks["model_input_text"] = tokenizer.prompt_string(example)
-        record = PromptRecord(
-            base_item_id=row["base_group_id"],
-            order_id=row["order_id"],
-            variant_id=row["variant_id"],
-            intervention_instance_id=row["instance_id"],
-            correct_label=row["correct_label"],
-            ordered_answer_texts=tuple(row["ordered_answer_texts"]),
-            resolved_blocks=blocks,
-            placement=blocks["placement"],
-            rendered_text=row["user_text"],
-            input_token_ids=tuple(input_ids),
-            attention={"mask": mask, "padding": "right"},
-            token_audit_id=audit.audit_id,
-            prompt_hash=content_digest({"kind": "rendered_user_text", "schema": 1, "text": row["user_text"]}),
-            selected_input_position=position,
-        )
         tokenized.append({
             **row,
-            "prompt": _plain(record.payload()),
             "input_ids": input_ids,
             "attention_mask": mask,
             "selected_position": position,
             "token_audit_id": audit.audit_id,
         })
-    _write_json(storage / "prompts" / "tokenized.json", tokenized)
     return tokenized
 
 

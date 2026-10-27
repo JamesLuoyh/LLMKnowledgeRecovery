@@ -185,15 +185,15 @@ def _store_row(key: str, produced: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("residuals are [layers, hidden], logits are [vocab], and the final norm is [hidden]")
     if residuals.shape[0] < 1 or final.shape != (residuals.shape[1],):
         raise ValueError("the final normalized state has the residual width and is not a layer")
+    # The final norm is only checked, not stored: no stage reads it.
     if numpy.array_equal(final, residuals[-1]):
         raise ValueError(
-            "the final normalized state matched the final block residual and was not stored in its place"
+            "the final normalized state matched the final block residual, so the residuals are post-norm"
         )
     return {
         "row_key": key,
         "residuals": residuals,
         "logits": logits,
-        "final_normalized": final,
     }
 
 

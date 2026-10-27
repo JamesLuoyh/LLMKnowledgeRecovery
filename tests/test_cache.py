@@ -222,12 +222,14 @@ def test_a_crash_before_flush_leaves_sealed_shards_that_commit_index_publishes(t
     assert store.row_status(key) == "indexed"
 
 
-def test_a_row_without_its_final_norm_is_not_stored(tmp_path):
+def test_the_final_norm_is_not_stored(tmp_path):
     store = ExtractionStore(tmp_path)
     row = _row(content_digest({"kind": "row", "label": "no-final"}))
+    references = store.write_rows([row])
     del row["final_normalized"]
-    with pytest.raises(ValueError, match="final normalized state"):
-        store.write_rows([row])
+    assert store.write_rows([{**row, "row_key": content_digest({"kind": "row", "label": "bare"})}])
+    names = {path.name for path in (tmp_path / "extractions" / "shards" / references[0].shard_id).iterdir()}
+    assert not any(name.startswith("final_norm") for name in names)
 
 
 def test_reporting_settings_and_extraction_exclusions_are_one_list():
