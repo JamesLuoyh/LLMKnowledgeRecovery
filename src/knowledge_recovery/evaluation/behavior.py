@@ -177,11 +177,19 @@ def _table(
     grouped: dict[str, dict[tuple[str, str], dict[str, BehaviorRow]]],
     clean_variant: str,
 ) -> BehaviorTable:
-    questions = [grouped[group_id] for group_id in sorted(grouped) if _split_of(grouped[group_id]) == split]
+    group_ids = [group_id for group_id in sorted(grouped) if _split_of(grouped[group_id]) == split]
+    questions = [grouped[group_id] for group_id in group_ids]
     denominator = len(questions)
-    correct_a = [item for item in questions if _correct(_clean_row(item, clean_variant, "correct_at_A"), scoring)]
-    correct_b = [item for item in questions if _correct(_clean_row(item, clean_variant, "correct_at_B"), scoring)]
-    both = [item for item in correct_a if item in correct_b]
+    correct_a = {
+        group_id for group_id in group_ids
+        if _correct(_clean_row(grouped[group_id], clean_variant, "correct_at_A"), scoring)
+    }
+    correct_b = {
+        group_id for group_id in group_ids
+        if _correct(_clean_row(grouped[group_id], clean_variant, "correct_at_B"), scoring)
+    }
+    # Match by group id: comparing question dicts is slow and scans the list per item.
+    both = [grouped[group_id] for group_id in group_ids if group_id in correct_a and group_id in correct_b]
     both_count = len(both)
     if both_count > min(len(correct_a), len(correct_b)) or len(correct_a) > denominator:
         raise ValueError("paired counts violate set-intersection bounds")
