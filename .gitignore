@@ -5,3 +5,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Run outputs and local settings
+wandb/
+plots/
+filter-out/
+.python-version
