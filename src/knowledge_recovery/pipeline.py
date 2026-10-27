@@ -881,7 +881,8 @@ def _evaluation_rows(storage: Path, views: Mapping[str, Mapping[str, Any]]) -> t
                                   extraction_command="kr extract --config <path>") if awareness_rows else ()
         for row, reference in zip(awareness_rows, references, strict=True):
             residual = store.read_residual_row(reference)
-            residuals = {index + 1: tuple(float(value) for value in residual[index]) for index in range(residual.shape[0])}
+            # Row views of one float32 array per row. Python floats would need ~400 GB for MMLU.
+            residuals = dict(enumerate(residual, start=1))
             row_id = content_digest({"kind": "evaluation_row", "schema": 1, "row_key": row["row_key"],
                                      "base_group_id": row["base_group_id"], "variant_id": row["variant_id"],
                                      "instance_id": row["instance_id"], "order_id": row["order_id"]})
