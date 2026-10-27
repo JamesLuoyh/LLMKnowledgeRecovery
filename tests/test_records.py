@@ -8,19 +8,14 @@ from knowledge_recovery.records import (
     SCHEMA_VERSION,
     AnswerScores,
     BaseItem,
-    EvaluationManifest,
-    ExecutionProvenance,
-    ExtractionRecord,
     ExtractionRow,
     FilterReport,
     InterventionInstance,
     InterventionSpec,
     MethodSpec,
-    ProbeSpec,
     ProbeTraining,
     PromptRecord,
     Record,
-    RunManifest,
     SplitManifest,
     TaskSpec,
 )
@@ -60,7 +55,6 @@ def test_every_record_has_a_distinct_kind_and_schema():
     assert len(kinds) == len(set(kinds))
     assert all(cls.schema == SCHEMA_VERSION == 1 for cls in classes)
     assert "extraction_row" in kinds
-    assert "execution_provenance" in kinds
 
 
 def test_records_are_frozen_unhashable_and_preserve_text():
@@ -91,13 +85,7 @@ def test_base_item_rejects_empty_or_equal_answers():
     assert spaced.correct_answer == " yes"
 
 
-def test_execution_facts_have_a_record_outside_the_extraction_row():
-    execution = ExecutionProvenance(
-        timestamp="2026-01-01T00:00:00Z",
-        hostname="gpu-1",
-        batch_size=4,
-        processing_order=["row-b", "row-a"],
-    )
+def test_the_extraction_row_holds_only_the_three_signatures():
     row = ExtractionRow(
         model_signature=DIGEST, prompt_signature=OTHER, extraction_signature=DIGEST
     )
@@ -106,68 +94,7 @@ def test_execution_facts_have_a_record_outside_the_extraction_row():
         "prompt_signature",
         "extraction_signature",
     }
-    assert "hostname" in identify(execution).canonical_json
-    assert "gpu-1" not in identify(row).canonical_json
-    with pytest.raises(ValueError, match="hostname"):
-        RunManifest(
-            train_view_id=DIGEST,
-            validation_view_id=OTHER,
-            extraction_references=["shard-1"],
-            task={"id": "agreement"},
-            architecture={"name": "linear"},
-            features={"layers": "all"},
-            preprocessing={"normalize": "standardize"},
-            training_seed=42,
-            loss={"name": "binary_cross_entropy"},
-            optimizer={"name": "adamw"},
-            stopping_rules={"patience": 20},
-            selection_rules={"metric": "validation_cross_entropy"},
-            environment_versions={"hostname": "gpu-1"},
-            checkpoint_digest=None,
-            selection_digest=None,
-        )
-
-
-def test_run_manifest_outputs_are_not_part_of_the_stored_training_fields():
-    training_fields = {item.name for item in fields(RunManifest)}
-    assert "checkpoint_digest" in training_fields
-    assert "ece_bins" not in training_fields
-    assert "test_variants" not in training_fields
-    blank = RunManifest(
-        train_view_id=DIGEST,
-        validation_view_id=OTHER,
-        extraction_references=["shard-1"],
-        task="agreement",
-        architecture="linear",
-        features="residual",
-        preprocessing="standardize",
-        training_seed=7,
-        loss="binary_cross_entropy",
-        optimizer="adamw",
-        stopping_rules={"patience": 20},
-        selection_rules={"metric": "validation_cross_entropy"},
-        environment_versions={"numpy": "2.0.0"},
-        checkpoint_digest=None,
-        selection_digest=None,
-    )
-    finished = RunManifest(
-        train_view_id=DIGEST,
-        validation_view_id=OTHER,
-        extraction_references=["shard-1"],
-        task="agreement",
-        architecture="linear",
-        features="residual",
-        preprocessing="standardize",
-        training_seed=7,
-        loss="binary_cross_entropy",
-        optimizer="adamw",
-        stopping_rules={"patience": 20},
-        selection_rules={"metric": "validation_cross_entropy"},
-        environment_versions={"numpy": "2.0.0"},
-        checkpoint_digest=DIGEST,
-        selection_digest=OTHER,
-    )
-    assert identify(blank).digest != identify(finished).digest
+    assert set(identify(row).record) == {"kind", "schema", "model_signature", "prompt_signature", "extraction_signature"}
     assert "checkpoint_digest" not in {item.name for item in fields(ProbeTraining)}
 
 
@@ -256,38 +183,7 @@ def test_remaining_records_keep_their_kind_and_sequence_order():
         parameters={"rule": "training_mean"},
         output_validation={"range": [0, 1]},
     )
-    probe = ProbeSpec(
-        layers=[1, 2],
-        positions=["last_nonpadding_input_token"],
-        preprocessing="standardize",
-        output_interface="bernoulli",
-        architecture="linear",
-        compatible_tasks=["agreement"],
-        compatible_losses=["binary_cross_entropy"],
-    )
-    stored = ExtractionRecord(
-        prompt_id=DIGEST,
-        extraction_key=OTHER,
-        residual_reference={"shard": "residuals", "row": 0},
-        logits_reference={"shard": "logits", "row": 0},
-        final_normalized_state={"shard": "final", "row": 0},
-        numeric_metadata={"precision": "bf16"},
-        shard_references=["residuals", "logits"],
-    )
-    evaluation = EvaluationManifest(
-        task_id="agreement",
-        method_id="linear_agreement",
-        method_state_digest=DIGEST,
-        evaluation_view_id=OTHER,
-        metric_definitions={"ece_bins": 15},
-        aggregation_rules={"pooled": True},
-        calibration_bins=15,
-        prediction_convention="probabilities",
-        prediction_version="predict-1",
-        metrics_version="metrics-1",
-        output_references={"json": "evaluations/out.json"},
-    )
-    records = (spec, instance, prompt, scores, split, report, task, method, probe, stored, evaluation)
+    records = (spec, instance, prompt, scores, split, report, task, method)
     assert [record.kind for record in records] == [
         "intervention_spec",
         "intervention_instance",
@@ -297,9 +193,6 @@ def test_remaining_records_keep_their_kind_and_sequence_order():
         "filter_report",
         "task_spec",
         "method_spec",
-        "probe_spec",
-        "extraction_record",
-        "evaluation_manifest",
     ]
     assert " café " in identify(prompt).canonical_json
     assert identify(split).digest == identify(SplitManifest(

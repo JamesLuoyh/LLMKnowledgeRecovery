@@ -238,17 +238,12 @@ No import used by probe fitting should instantiate model weights or resolve netw
 \item[InterventionInstance.] Base-item ID, variant ID, stable instance ID, exact context blocks, resolved insertion anchors, source/content digests, optional preparation seed, and declared data dependencies.
 One specification may produce different text for each question and multiple instances for a question.
 \item[PromptRecord.] Base-item ID, order ID, variant and intervention-instance IDs, correct label, ordered answer texts, resolved blocks/placement, complete rendered text, input token IDs, attention information, token-audit ID, prompt hash, and selected input position.
-\item[ExtractionRecord.] Prompt ID, extraction key, per-layer residual vectors, full-vocabulary logits, optional final normalized state, numeric metadata, and shard references.
 \item[AnswerScores.] Raw A/B probabilities, canonical A/B probabilities, canonical-label mass, unrestricted greedy token ID, canonical greedy label, invalid-label flag, and scoring-version identifier.
 \item[SplitManifest.] Base-group ID to split mapping, eligible source universe, grouping version, seed, fractions, integer allocations, and manifest digest.
 \item[FilterReport.] Both paired eligibility masks, order-specific failures, population counts, split denominators, canonical-only diagnostics, and report digest. Output paths are written beside the record and do not enter the digest.
 Each later analysis manifest records the applicable threshold and current diagnostic report.
 \item[TaskSpec.] Task-specific input/output schemas, target construction, class meaning/order, permitted prediction-time features, decoding convention, and pointwise-score definition.
 \item[MethodSpec.] Task ID, method ID, task-specific adapter/interface version, declared fit/predict inputs, fitting requirement, optional shared architecture, method parameters, and output validation.
-\item[ProbeSpec.] Required layers/positions, preprocessing, probabilistic output interface, architecture configuration, and compatible tasks/losses.
-\item[RunManifest.] Training and validation view IDs, extraction references, task, architecture/features, preprocessing, training seed, loss, optimizer, stopping/selection rules, environment versions, and resulting checkpoint/selection digests.
-Test/OOD assignments and reporting-only metrics belong to evaluation manifests, not to this training identity.
-\item[EvaluationManifest.] Task/method ID, saved-method-state digest, optional checkpoint/selection/transform digests, evaluation-view ID, metric definitions, aggregation rules, calibration bins, uncertainty settings, and output references.
 \end{description}
 \texttt{DatasetAdapter} returns base items and provenance; it does not split or query a model.
 \texttt{InterventionProvider} materializes intervention instances from a base item and a specification, without access to probe predictions or split assignments.
