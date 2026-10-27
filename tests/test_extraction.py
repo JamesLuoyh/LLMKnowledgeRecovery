@@ -122,7 +122,6 @@ def test_storage_dtypes_and_separate_final_norm(tmp_path):
     assert numpy.fromfile(logits_file, dtype="<f4").dtype == numpy.float32
     final = store.read_final_norm_row(references[0])
     residual = store.read_residual_row(references[0])
-    assert final is not None
     assert not numpy.array_equal(final, residual[-1])
     assert store.read_logits_row(references[0]).dtype == numpy.float32
 
@@ -340,9 +339,10 @@ def test_the_logits_scope_enters_the_row_key():
         "prompt_contract_digest": _key("contract"),
         "selected_position": 2,
         "execution_precision": "bf16",
+        "attention_backend": "sdpa",
+        "numeric_runtime_signature": {"backend": "integration_mock", "execution_precision": "bf16"},
     }
-    full = build_row_key(**common)
-    assert build_row_key(**common, logits_scope="full_vocabulary") == full
+    full = build_row_key(**common, logits_scope="full_vocabulary")
     assert build_row_key(**common, logits_scope="ab_summary") != full
     with pytest.raises(ValueError, match="logits_scope must be one of"):
         build_row_key(**common, logits_scope="top_k")

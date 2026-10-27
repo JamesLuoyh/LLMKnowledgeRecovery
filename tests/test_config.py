@@ -240,10 +240,6 @@ def test_variant_filter_flags_default_off_and_the_final_filter_needs_stats(tmp_p
     loose["analysis_view"]["filter_correct"]["variant_stats"] = "yes"
     with pytest.raises(ConfigurationError, match="variant_stats must be an explicit boolean"):
         _load(loose, tmp_path)
-    renamed = _document()
-    renamed["analysis_view"]["filter_correct"]["require_all_variants"] = True
-    with pytest.raises(ConfigurationError, match="renamed to require_confident_on_every_variant"):
-        _load(renamed, tmp_path)
 
 
 def test_empty_eval_variants_mean_no_ood_view(tmp_path):

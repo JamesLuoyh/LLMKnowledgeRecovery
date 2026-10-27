@@ -31,6 +31,9 @@ def _base_key():
         prompt_contract_digest=DIGEST_B,
         selected_position=3,
         execution_precision="bf16",
+        attention_backend="sdpa",
+        logits_scope="full_vocabulary",
+        numeric_runtime_signature={"backend": "integration_mock", "execution_precision": "bf16"},
     )
 
 
@@ -78,6 +81,7 @@ def test_analysis_changes_keep_extraction_keys_and_prompt_model_position_do_not(
         "row_key": original,
         "residuals": numpy.ones((1, 2), dtype=numpy.float32),
         "logits": numpy.ones(3, dtype=numpy.float32),
+        "final_normalized": numpy.zeros(2, dtype=numpy.float32),
     }])
 
     def boom():

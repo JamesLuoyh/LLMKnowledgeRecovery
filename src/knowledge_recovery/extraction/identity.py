@@ -40,9 +40,9 @@ def build_row_key(
     selected_position: int,
     execution_precision: str,
     quantization: str = "none",
-    attention_backend: str = "eager",
-    logits_scope: str = "full_vocabulary",
-    numeric_runtime_signature: Mapping[str, Any] | None = None,
+    attention_backend: str,
+    logits_scope: str,
+    numeric_runtime_signature: Mapping[str, Any],
     reporting: Mapping[str, Any] | None = None,
 ) -> str:
     """Hash one logical forward pass. ``reporting`` does not enter the key."""
@@ -78,17 +78,7 @@ def build_row_key(
             "augmentation": False,
             "seeded_inference": False,
         },
-        numeric_runtime_signature=(
-            dict(numeric_runtime_signature)
-            if numeric_runtime_signature is not None
-            else {
-                "backend": "unspecified",
-                "attention_backend": attention_backend,
-                "execution_precision": execution_precision,
-                "residual_storage_dtype": "bf16",
-                "logits_storage_dtype": "float32",
-            }
-        ),
+        numeric_runtime_signature=dict(numeric_runtime_signature),
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
         tensor_schema_version=TENSOR_SCHEMA_VERSION,

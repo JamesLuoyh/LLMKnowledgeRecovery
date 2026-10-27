@@ -549,11 +549,6 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
     ))
     if not math.isclose(sum(fractions), 1.0, abs_tol=1e-12):
         raise ConfigurationError("analysis_view.split fractions must sum to 1")
-    if type(body["filter_correct"]) is dict and "require_all_variants" in body["filter_correct"]:
-        raise ConfigurationError(
-            "analysis_view.filter_correct.require_all_variants was renamed to "
-            "require_confident_on_every_variant"
-        )
     chosen = _object(
         body["filter_correct"],
         "analysis_view.filter_correct",

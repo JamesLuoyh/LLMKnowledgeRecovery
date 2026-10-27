@@ -356,15 +356,6 @@ class QwenAdapter:
     def parameters(self):
         return self.inner.parameters()
 
-    def forward(self, input_ids: Any, attention_mask: Any):
-        import torch
-
-        ids = torch.tensor(numpy.asarray(input_ids), dtype=torch.long, device=self.device)
-        mask = torch.tensor(numpy.asarray(attention_mask), dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            result = self.inner(input_ids=ids, attention_mask=mask, use_cache=False)
-        return result.logits
-
     def forward_selected(self, input_ids: Any, attention_mask: Any, positions: Sequence[int]):
         """Run the decoder, then ``lm_head`` on one position per row: ``[batch, vocab]``."""
         import torch

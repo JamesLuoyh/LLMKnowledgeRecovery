@@ -379,7 +379,6 @@ def extract_stage(request: StageRequest) -> None:
             forward_batch=forward,
             initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
-            execution_backend=str(model_config.get("model_type") or "local"),
         )
     else:
         result = run_extraction(
@@ -452,10 +451,9 @@ def diagnose_stage(request: StageRequest) -> None:
         A=int(collection["canonical_token_ids"]["A"]),
         B=int(collection["canonical_token_ids"]["B"]),
     )
-    # Collections written before logits_scope was recorded hold full-vocabulary logits.
     scorer = (
         score_binary_summary
-        if collection["numeric"].get("logits_scope", "full_vocabulary") == "ab_summary"
+        if collection["numeric"]["logits_scope"] == "ab_summary"
         else score_binary_answers
     )
     scored = []
@@ -1091,13 +1089,8 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "name": extraction.dataset_name,
             "split": extraction.dataset_split,
             "revision": extraction.dataset_revision,
-            **({"distractor_seed": extraction.distractor_seed} if extraction.distractor_seed is not None else {}),
-            # Absent for seeded_random so earlier MMLU collections keep their signature.
-            **(
-                {"distractor_selection": extraction.distractor_selection}
-                if extraction.distractor_selection in PREFERRED_SELECTIONS
-                else {}
-            ),
+            "distractor_seed": extraction.distractor_seed,
+            "distractor_selection": extraction.distractor_selection,
         },
         "prompt": {
             "chat": extraction.chat,
@@ -1109,8 +1102,7 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
         },
         "interventions": [_plain(vars(item)) for item in extraction.interventions],
         "prepared_identity": prepared_identity,
-        # Absent for full_vocabulary so earlier collections keep their signature.
-        **({"logits_scope": extraction.logits_scope} if extraction.logits_scope != "full_vocabulary" else {}),
+        "logits_scope": extraction.logits_scope,
     })
 
 
