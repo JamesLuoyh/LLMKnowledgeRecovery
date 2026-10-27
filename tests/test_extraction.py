@@ -283,6 +283,32 @@ def test_missing_rows_are_computed_shortest_first(tmp_path):
     assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
 
 
+def test_rows_sharing_a_key_are_computed_and_stored_once(tmp_path):
+    store = ExtractionStore(tmp_path)
+    shared = _key("same-prompt")
+    rows = [
+        {"row_key": shared, "input_ids": [1, 2]},
+        {"row_key": _key("other"), "input_ids": [1, 2, 3]},
+        {"row_key": shared, "input_ids": [1, 2]},
+    ]
+    seen = []
+
+    def forward(_model, chunk, *, batch_size, precision):
+        seen.extend(row["row_key"] for row in chunk)
+        return [_produced() for _ in chunk]
+
+    result = run_extraction(
+        rows,
+        store=store,
+        model_factory=lambda: MockQwen(n_layers=1, hidden=1, vocab=1, precision="bf16"),
+        forward_batch=forward,
+        initial_batch_size=4,
+        precision="bf16",
+    )
+    assert sorted(seen) == sorted([shared, _key("other")])
+    assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
+
+
 def test_a_device_out_of_memory_error_asks_for_a_smaller_batch(monkeypatch):
     from knowledge_recovery.models import qwen
 

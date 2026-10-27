@@ -47,7 +47,7 @@ from knowledge_recovery.evaluation.evaluate import EvaluationRow, evaluate_saved
 from knowledge_recovery.evaluation.metrics import DEFAULT_ECE_BINS
 from knowledge_recovery.extraction.identity import build_row_key
 from knowledge_recovery.extraction.positions import last_nonpadding_index, select_last_nonpadding
-from knowledge_recovery.extraction.runner import run_extraction
+from knowledge_recovery.extraction.runner import run_extraction, unique_missing_rows
 from knowledge_recovery.interventions.materialize import materialize_interventions, specs_from_config
 from knowledge_recovery.methods.awareness import RULE as TRAINING_FREQUENCY_RULE
 from knowledge_recovery.methods.awareness import TrainingFrequency, fit_training_frequency
@@ -350,11 +350,9 @@ def extract_stage(request: StageRequest) -> None:
     devices = _visible_devices(config) if missing else []
     if len(devices) > 1:
         # Every GPU stores a disjoint share of the missing rows; the lookup below reads them all.
-        absent = set(missing)
         pending = [
             {field: row[field] for field in EXTRACT_WORKER_FIELDS}
-            for row in prepared
-            if row["row_key"] in absent
+            for row in unique_missing_rows(prepared, missing)
         ]
         from tqdm import tqdm
 

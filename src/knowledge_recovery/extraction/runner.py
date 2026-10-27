@@ -91,13 +91,10 @@ def run_extraction(
         )
     model = model_factory()
     freeze_model(model)
-    absent = set(missing)
+    # Rows with the same key share one stored result, so each key is computed once.
     # Similar lengths share a batch, so little of each forward is padding. A batch
     # that halves after an out-of-memory error then only meets longer prompts.
-    pending = sorted(
-        (row for row in rows if row["row_key"] in absent),
-        key=lambda row: len(row.get("input_ids", ())),
-    )
+    pending = sorted(unique_missing_rows(rows, missing), key=lambda row: len(row.get("input_ids", ())))
     batch_sizes = _compute_missing(
         pending,
         store=store,
@@ -113,6 +110,21 @@ def run_extraction(
         batch_sizes=batch_sizes,
         precision=precision,
     )
+
+
+def unique_missing_rows(rows: Sequence[Mapping[str, Any]], missing: Sequence[str]) -> list[Mapping[str, Any]]:
+    """The first row for each missing key, in row order.
+
+    Two prompts with identical tokens share a row key, for example two MMLU
+    items that differ only in a choice neither binary prompt shows.
+    """
+    absent = set(missing)
+    unique: list[Mapping[str, Any]] = []
+    for row in rows:
+        if row["row_key"] in absent:
+            absent.discard(row["row_key"])
+            unique.append(row)
+    return unique
 
 
 @contextmanager
