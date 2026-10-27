@@ -315,8 +315,8 @@ def extract_stage(request: StageRequest) -> None:
     if not Path(config.extraction.model_path).exists() and collection_path.is_file():
         _reuse_collection(storage, collection_path, config)
         return
-    audit = _audit(config, recheck=False)
-    tokenized = _tokenize(config, audit)
+    rendered = _read_rendered(storage)
+    audit = _audit(config, recheck=False, rendered=rendered)
     assets = resolve_local_assets(config.extraction.model_path)
     signature = model_signature(
         weight_content_digest=assets.weight_content_digest,
@@ -327,21 +327,16 @@ def extract_stage(request: StageRequest) -> None:
     contract = _prompt_contract(config, audit).digest
     model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
     runtime = numeric_runtime_signature(model_config, precision=config.extraction.precision)
-    prepared = []
-    for row in tokenized:
-        row_key = build_row_key(
-            model_signature=signature,
-            input_ids=row["input_ids"],
-            attention_mask=row["attention_mask"],
-            prompt_contract_digest=contract,
-            position_selector=SUPPORTED_POSITION_SELECTOR,
-            selected_position=row["selected_position"],
-            execution_precision=config.extraction.precision,
-            attention_backend=str(runtime["attention_backend"]),
-            numeric_runtime_signature=runtime,
-            reporting=_reporting(config),
-        )
-        prepared.append({**row, "row_key": row_key})
+    prepared = _tokenize(config, audit, rendered, {
+        "model_signature": signature,
+        "prompt_contract_digest": contract,
+        "position_selector": SUPPORTED_POSITION_SELECTOR,
+        "execution_precision": config.extraction.precision,
+        "attention_backend": str(runtime["attention_backend"]),
+        "numeric_runtime_signature": runtime,
+        "reporting": _reporting(config),
+    })
+    del rendered
     store = ExtractionStore(storage)
     statuses = store.row_statuses([row["row_key"] for row in prepared])
     missing = [row["row_key"] for row in prepared if statuses[row["row_key"]] != "indexed"]
@@ -981,10 +976,11 @@ def _behavior_instance_labels(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[s
     return labels
 
 
-def _audit(config: ExperimentConfig, *, recheck: bool):
+def _audit(config: ExperimentConfig, *, recheck: bool, rendered: Sequence[Mapping[str, Any]] | None = None):
     storage = _storage(config)
     activate_offline(storage / "assets" / "huggingface")
-    rendered = json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
+    if rendered is None:
+        rendered = _read_rendered(storage)
     tokenizer = _tokenizer(Path(config.extraction.model_path))
     assets = resolve_local_assets(config.extraction.model_path)
     examples = []
@@ -1022,29 +1018,90 @@ def _audit(config: ExperimentConfig, *, recheck: bool):
     return audit
 
 
-def _tokenize(config: ExperimentConfig, audit) -> list[dict[str, Any]]:
-    """Token ids per rendered prompt, kept in memory. The row keys record them."""
-    storage = _storage(config)
-    rendered = json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
-    tokenizer = _tokenizer(Path(config.extraction.model_path))
+def _read_rendered(storage: Path) -> list[dict[str, Any]]:
+    return json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
+
+
+# Below this many prompts, tokenizing in the parent is faster than starting a pool.
+PARALLEL_TOKENIZE_MIN_ROWS = 20_000
+TOKENIZE_CHUNK_ROWS = 2_000
+TOKENIZE_MAX_PROCESSES = 32
+
+
+def _tokenize(
+    config: ExperimentConfig,
+    audit,
+    rendered: Sequence[Mapping[str, Any]],
+    key_settings: Mapping[str, Any],
+    *,
+    min_parallel_rows: int = PARALLEL_TOKENIZE_MIN_ROWS,
+) -> list[dict[str, Any]]:
+    """Token ids and the extraction row key per rendered prompt, kept in memory.
+
+    ``key_settings`` holds the ``build_row_key`` arguments shared by every row.
+    Large inputs are tokenized and keyed in a CPU process pool; the result is
+    the same row for row.
+    """
+    texts = [row["user_text"] for row in rendered]
+    setup = (config.extraction.model_path, config.extraction.chat, config.extraction.system_message, dict(key_settings))
+    chunks = [texts[start:start + TOKENIZE_CHUNK_ROWS] for start in range(0, len(texts), TOKENIZE_CHUNK_ROWS)]
+    processes = min(len(os.sched_getaffinity(0)), TOKENIZE_MAX_PROCESSES, len(chunks))
+    from contextlib import nullcontext
+
+    from tqdm import tqdm
+
+    if len(texts) < min_parallel_rows or processes < 2:
+        _start_row_encoder(*setup)
+        pool = nullcontext(None)
+    else:
+        import multiprocessing
+
+        pool = multiprocessing.get_context("spawn").Pool(processes, initializer=_start_row_encoder, initargs=setup)
+    encoded: list[tuple[list[int], str]] = []
+    with pool as workers, tqdm(total=len(texts), desc="tokenize", unit="row", dynamic_ncols=True) as progress:
+        parts = map(_encode_rows, chunks) if workers is None else workers.imap(_encode_rows, chunks)
+        for part in parts:
+            encoded.extend(part)
+            progress.update(len(part))
     tokenized = []
-    for row in rendered:
-        example = PromptExample(
-            user_text=row["user_text"],
-            chat=config.extraction.chat,
-            system_message=config.extraction.system_message,
-        )
-        input_ids = list(tokenizer.encode_prompt(example))
+    for row, (input_ids, row_key) in zip(rendered, encoded, strict=True):
         mask = [1] * len(input_ids)
-        position = last_nonpadding_index(mask)
         tokenized.append({
             **row,
             "input_ids": input_ids,
             "attention_mask": mask,
-            "selected_position": position,
+            "selected_position": last_nonpadding_index(mask),
             "token_audit_id": audit.audit_id,
+            "row_key": row_key,
         })
     return tokenized
+
+
+# Per-process tokenizer and shared key arguments for ``_encode_rows``.
+_ROW_ENCODER: tuple[Any, bool, str | None, dict[str, Any]] | None = None
+
+
+def _start_row_encoder(model_path: str, chat: bool, system_message: str | None, key_settings: dict[str, Any]) -> None:
+    global _ROW_ENCODER
+    _ROW_ENCODER = (_tokenizer(Path(model_path)), chat, system_message, key_settings)
+
+
+def _encode_rows(texts: Sequence[str]) -> list[tuple[list[int], str]]:
+    """Token ids and row key for each user text, in order."""
+    assert _ROW_ENCODER is not None, "_start_row_encoder runs first"
+    tokenizer, chat, system_message, key_settings = _ROW_ENCODER
+    encoded = []
+    for text in texts:
+        input_ids = list(tokenizer.encode_prompt(PromptExample(user_text=text, chat=chat, system_message=system_message)))
+        mask = [1] * len(input_ids)
+        row_key = build_row_key(
+            input_ids=input_ids,
+            attention_mask=mask,
+            selected_position=last_nonpadding_index(mask),
+            **key_settings,
+        )
+        encoded.append((input_ids, row_key))
+    return encoded
 
 
 def _reuse_collection(storage: Path, collection_path: Path, config: ExperimentConfig) -> None:

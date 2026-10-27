@@ -169,3 +169,33 @@ def test_extraction_stores_a_four_value_logit_summary(tmp_path):
     store = ExtractionStore(result["storage"])
     reference = store.lookup([collection["rows"][0]["row_key"]], model_factory=None, extraction_command="kr extract")[0]
     assert store.read_logits_row(reference).shape == (len(AB_SUMMARY_FIELDS),)
+
+
+def test_tokenizing_in_a_process_pool_matches_the_parent_and_the_stored_keys(tmp_path, monkeypatch):
+    from knowledge_recovery import pipeline
+    from knowledge_recovery.config import load_config
+
+    result = run_labeled_subset(tmp_path)
+    config = load_config(str(tmp_path / "config.yaml"))
+    rendered = pipeline._read_rendered(result["storage"])
+    audit = pipeline._audit(config, recheck=False, rendered=rendered)
+    collection = json.loads((result["storage"] / "extractions" / "collection.json").read_text(encoding="utf-8"))
+    settings = {
+        "model_signature": collection["model_signature"],
+        "prompt_contract_digest": collection["prompt_contract_digest"],
+        "position_selector": pipeline.SUPPORTED_POSITION_SELECTOR,
+        "execution_precision": config.extraction.precision,
+        "attention_backend": collection["numeric"]["attention_backend"],
+        "numeric_runtime_signature": collection["numeric"]["runtime_signature"],
+        "reporting": pipeline._reporting(config),
+    }
+    serial = pipeline._tokenize(config, audit, rendered, settings)
+    # One prompt per chunk so the pool gets several chunks.
+    monkeypatch.setattr(pipeline, "TOKENIZE_CHUNK_ROWS", 1)
+    monkeypatch.setattr(pipeline, "_ROW_ENCODER", None)
+    pooled = pipeline._tokenize(config, audit, rendered, settings, min_parallel_rows=0)
+    # The parent never set up an encoder, so the workers did the encoding.
+    assert pipeline._ROW_ENCODER is None
+    assert len(rendered) > 1
+    assert pooled == serial
+    assert [row["row_key"] for row in serial] == [row["row_key"] for row in collection["rows"]]
