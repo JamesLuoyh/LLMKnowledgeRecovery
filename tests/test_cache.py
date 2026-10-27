@@ -26,7 +26,8 @@ def _row(key: str, *, scale: float = 1.0, named: bool = False) -> dict:
         residuals = {1: numpy.array([scale, 0.0], dtype=numpy.float32), 2: numpy.array([scale], dtype=numpy.float32)}
     else:
         residuals = numpy.array([[scale, 0.0], [-scale, 0.5]], dtype=numpy.float32)
-    return {"row_key": key, "residuals": residuals, "logits": logits}
+    final = numpy.array([scale + 4, 1.0], dtype=numpy.float32)
+    return {"row_key": key, "residuals": residuals, "logits": logits, "final_normalized": final}
 
 
 def _boom():
@@ -219,3 +220,19 @@ def test_a_crash_before_flush_leaves_sealed_shards_that_commit_index_publishes(t
     assert store.row_status(key) == "complete_unindexed"
     store.commit_index()
     assert store.row_status(key) == "indexed"
+
+
+def test_a_row_without_its_final_norm_is_not_stored(tmp_path):
+    store = ExtractionStore(tmp_path)
+    row = _row(content_digest({"kind": "row", "label": "no-final"}))
+    del row["final_normalized"]
+    with pytest.raises(ValueError, match="final normalized state"):
+        store.write_rows([row])
+
+
+def test_reporting_settings_and_extraction_exclusions_are_one_list():
+    from knowledge_recovery.cache import REPORTING_SETTINGS
+    from knowledge_recovery.records import EXTRACTION_EXCLUDED_KEYS
+
+    assert REPORTING_SETTINGS is EXTRACTION_EXCLUDED_KEYS
+    assert "require_confident_on_every_variant" in REPORTING_SETTINGS

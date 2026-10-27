@@ -58,14 +58,11 @@ def test_shipped_file_is_three_explicit_contracts():
         "sycophancy_NT_IC",
     ]
     assert view.min_correct_prob == 0.8
-    assert not hasattr(view, "probability_basis")
-    assert not hasattr(view, "decision_record")
     assert view.train_variants == ("clean", "T-C", "T-IC")
     assert view.eval_variants == ("NT-C", "NT-IC")
     assert view.split_seed == 42 and probe.training_seed == 42
     assert not hasattr(extraction, "split_seed")
     assert not hasattr(extraction, "training_seed")
-    assert not hasattr(extraction, "probability_basis")
     assert not hasattr(extraction, "ece_bins")
     assert probe.profile == LINEAR_V1
     assert LINEAR_V1.learning_rate == 1e-3
@@ -95,17 +92,6 @@ def test_unknown_keys_and_schema_versions_are_rejected(tmp_path):
     wrong["analysis_view"]["schema_version"] = 2
     with pytest.raises(ConfigurationError, match="schema_version must be 1"):
         _load(wrong, tmp_path)
-
-
-def test_a_probability_basis_is_not_a_configuration_field(tmp_path):
-    inferred = _document()
-    inferred["analysis_view"]["filter_correct"]["probability_basis"] = "canonical"
-    with pytest.raises(ConfigurationError, match="unknown keys: probability_basis"):
-        _load(inferred, tmp_path)
-    recorded = _document()
-    recorded["analysis_view"]["filter_correct"]["decision_record"] = "choice.json"
-    with pytest.raises(ConfigurationError, match="unknown keys: decision_record"):
-        _load(recorded, tmp_path)
 
 
 def test_precision_and_system_message_are_explicit(tmp_path):
@@ -240,10 +226,6 @@ def test_variant_filter_flags_default_off_and_the_final_filter_needs_stats(tmp_p
     loose["analysis_view"]["filter_correct"]["variant_stats"] = "yes"
     with pytest.raises(ConfigurationError, match="variant_stats must be an explicit boolean"):
         _load(loose, tmp_path)
-    renamed = _document()
-    renamed["analysis_view"]["filter_correct"]["require_all_variants"] = True
-    with pytest.raises(ConfigurationError, match="renamed to require_confident_on_every_variant"):
-        _load(renamed, tmp_path)
 
 
 def test_empty_eval_variants_mean_no_ood_view(tmp_path):

@@ -16,7 +16,6 @@ import numpy
 TENSOR_SCHEMA_VERSION = 1
 RESIDUAL_DTYPE = "bfloat16"
 LOGITS_DTYPE = "float32"
-INDEX_KIND = "extraction_index"
 SHARD_KIND = "extraction_shard"
 
 

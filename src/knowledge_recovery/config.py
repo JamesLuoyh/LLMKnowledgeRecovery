@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -110,22 +110,26 @@ LINEAR_V1 = LinearV1(
 
 @dataclass(frozen=True)
 class InterventionDefinition:
-    """One configured variant. Absent optional fields stay null."""
+    """One configured variant. Absent optional fields keep their defaults.
+
+    The extraction request signature leaves out fields equal to their default,
+    so a new optional field must default to its old implicit behavior.
+    """
 
     id: str
     provider: str
-    preset: str | None
-    template: str | None
-    source: str | None
-    join_on: str | None
-    text_field: str | None
-    instance_field: str | None
     placement: Any
-    pairing: str | None
-    on_missing: str | None
-    family: str | None
-    tags: tuple[str, ...]
-    parameters: Mapping[str, Any]
+    preset: str | None = None
+    template: str | None = None
+    source: str | None = None
+    join_on: str | None = None
+    text_field: str | None = None
+    instance_field: str | None = None
+    pairing: str | None = None
+    on_missing: str | None = None
+    family: str | None = None
+    tags: tuple[str, ...] = ()
+    parameters: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -168,7 +172,6 @@ class ExtractionConfig:
     save_final_normalized_state: bool
     residual_storage_dtype: str
     logits_storage_dtype: str
-    logits_scope: str
     # Only the mmlu adapter reads these; they are null for sycophancy.
     distractor_seed: int | None = None
     distractor_selection: str | None = None
@@ -344,7 +347,6 @@ def _extraction(raw: Any) -> ExtractionConfig:
             "save_final_normalized_state",
             "residual_storage_dtype",
             "logits_storage_dtype",
-            "logits_scope",
         ),
     )
     offline = _bool(assets, "offline", "extraction.assets")
@@ -460,7 +462,6 @@ def _extraction(raw: Any) -> ExtractionConfig:
     _expect(internals, "representation", "post_block_pre_final_norm", "extraction.internals")
     _expect(internals, "residual_storage_dtype", "bf16", "extraction.internals")
     _expect(internals, "logits_storage_dtype", "float32", "extraction.internals")
-    _expect(internals, "logits_scope", "full_vocabulary", "extraction.internals")
     if internals["save_final_normalized_state"] is not True:
         raise ConfigurationError(
             "extraction.internals.save_final_normalized_state must be true. "
@@ -523,7 +524,6 @@ def _extraction(raw: Any) -> ExtractionConfig:
         save_final_normalized_state=True,
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
-        logits_scope="full_vocabulary",
         distractor_seed=distractor_seed,
         distractor_selection=distractor_selection,
     )
@@ -543,11 +543,6 @@ def _analysis_view(raw: Any) -> AnalysisViewConfig:
     ))
     if not math.isclose(sum(fractions), 1.0, abs_tol=1e-12):
         raise ConfigurationError("analysis_view.split fractions must sum to 1")
-    if type(body["filter_correct"]) is dict and "require_all_variants" in body["filter_correct"]:
-        raise ConfigurationError(
-            "analysis_view.filter_correct.require_all_variants was renamed to "
-            "require_confident_on_every_variant"
-        )
     chosen = _object(
         body["filter_correct"],
         "analysis_view.filter_correct",

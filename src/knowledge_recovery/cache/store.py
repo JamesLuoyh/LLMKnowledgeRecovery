@@ -277,19 +277,17 @@ class ExtractionStore:
         return numpy.stack(layers, axis=0) if len(set(widths)) == 1 else numpy.array(layers, dtype=object)
 
     def read_logits_row(self, reference: RowReference) -> numpy.ndarray:
-        """Memory-map one stored full-vocabulary logit vector."""
+        """Memory-map one stored logit summary (``AB_SUMMARY_FIELDS`` order)."""
         directory = self.shard_root / reference.shard_id
         manifest = _sealed_manifest(directory)
         shape = tuple(manifest["logits_shape"])
         mapped = numpy.memmap(directory / "logits.f32", dtype="<f4", mode="r", shape=shape)
         return numpy.array(mapped[reference.row_offset], dtype=numpy.float32)
 
-    def read_final_norm_row(self, reference: RowReference) -> numpy.ndarray | None:
-        """Return the separately stored final norm, or None when a shard predates it."""
+    def read_final_norm_row(self, reference: RowReference) -> numpy.ndarray:
+        """Memory-map the separately stored final norm for one row."""
         directory = self.shard_root / reference.shard_id
         manifest = _sealed_manifest(directory)
-        if "final_norm.bf16" not in manifest["files"]:
-            return None
         shape = tuple(manifest["final_norm_shape"])
         mapped = numpy.memmap(directory / "final_norm.bf16", dtype="<u2", mode="r", shape=shape)
         return bf16_to_f32(numpy.array(mapped[reference.row_offset]))
@@ -364,20 +362,17 @@ def _rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         logits = numpy.asarray(row.get("logits"), dtype=numpy.float32)
         if logits.ndim != 1 or logits.shape[0] < 1:
             raise ValueError("logits must be a full-vocabulary vector")
-        final = row.get("final_normalized")
-        if final is not None:
-            final = numpy.asarray(final, dtype=numpy.float32)
-            if final.ndim != 1:
-                raise ValueError("final normalized state is one vector per row")
+        if row.get("final_normalized") is None:
+            raise ValueError("every row stores its final normalized state")
+        final = numpy.asarray(row["final_normalized"], dtype=numpy.float32)
+        if final.ndim != 1:
+            raise ValueError("final normalized state is one vector per row")
         parsed.append({
             "row_key": key,
             "residuals": residuals,
             "logits": logits,
             "final_normalized": final,
         })
-    finals = [item["final_normalized"] is not None for item in parsed]
-    if any(finals) and not all(finals):
-        raise ValueError("final normalized state must be stored for every row or for none")
     return parsed
 
 
@@ -429,10 +424,8 @@ def _write_final_norm(
     directory: Path,
     rows: Sequence[Mapping[str, Any]],
     files: dict[str, dict[str, Any]],
-) -> list[int] | None:
+) -> list[int]:
     """Store the final norm beside the block residuals. It is not a layer column."""
-    if rows[0]["final_normalized"] is None:
-        return None
     stacked = numpy.stack([numpy.asarray(row["final_normalized"], dtype=numpy.float32) for row in rows])
     name = "final_norm.bf16"
     numpy.ascontiguousarray(f32_to_bf16(stacked), dtype="<u2").tofile(directory / name)

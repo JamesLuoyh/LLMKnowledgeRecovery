@@ -18,7 +18,11 @@ from typing import Any
 
 import numpy
 
-from knowledge_recovery.answers.canonical import CanonicalTokens, score_binary_answers
+from knowledge_recovery.answers.canonical import (
+    CanonicalTokens,
+    score_binary_summary,
+    summarize_binary_logits,
+)
 from knowledge_recovery.cache.store import ExtractionStore
 from knowledge_recovery.cli import StageRequest
 from knowledge_recovery.config import ExperimentConfig, load_config, validate_before_expensive_work
@@ -67,7 +71,7 @@ from knowledge_recovery.prompts.token_audit import (
     write_token_audit,
 )
 from knowledge_recovery.provenance import canonical_json, content_digest, identify, model_signature, prompt_contract, run_id
-from knowledge_recovery.records import PromptRecord
+from knowledge_recovery.records import PromptRecord, non_default_fields
 from knowledge_recovery.reports.export import export_report
 from knowledge_recovery.tasks import awareness_task_spec, consistency_task_spec
 from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
@@ -95,6 +99,8 @@ STAGE_ORDER = (
     "evaluate",
     "report",
 )
+# First attempted extraction batch. An out-of-memory error halves it; it is not in the row key.
+EXTRACTION_BATCH_SIZE = 32
 METHOD_BINDINGS = (
     ("behavioral_awareness", "linear_agreement", "linear"),
     ("behavioral_awareness", "training_frequency", "training_frequency"),
@@ -349,12 +355,17 @@ def extract_stage(request: StageRequest) -> None:
     def factory() -> object:
         return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
 
+    canonical = CanonicalTokens(A=int(audit.token_ids["A"]), B=int(audit.token_ids["B"]))
+
     def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
         if model_config.get("logit_rule") == "integration_subset_v1":
             from knowledge_recovery.integration import subset_forward
 
-            return subset_forward(model, rows, batch_size=batch_size, precision=precision)
-        return forward_padded(model, rows, batch_size=batch_size, precision=precision)
+            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
+        else:
+            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
+        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
+        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
 
     if missing:
         result = run_extraction(
@@ -362,9 +373,8 @@ def extract_stage(request: StageRequest) -> None:
             store=store,
             model_factory=factory,
             forward_batch=forward,
-            initial_batch_size=4,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
-            execution_backend=str(model_config.get("model_type") or "local"),
         )
     else:
         result = run_extraction(
@@ -372,7 +382,7 @@ def extract_stage(request: StageRequest) -> None:
             store=store,
             model_factory=factory,
             forward_batch=forward,
-            initial_batch_size=4,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
             probe_only=True,
         )
@@ -439,7 +449,7 @@ def diagnose_stage(request: StageRequest) -> None:
     scored = []
     for row in rows:
         logits = store.read_logits_row(references[row["row_key"]])
-        scores = score_binary_answers([float(value) for value in logits.tolist()], tokens)
+        scores = score_binary_summary([float(value) for value in logits.tolist()], tokens)
         raw_label = None
         if scores.unrestricted_greedy_token_id == tokens.A:
             raw_label = "A"
@@ -537,7 +547,6 @@ def diagnose_stage(request: StageRequest) -> None:
     )
     _write_json(storage / "analyses" / "behavior.json", {
         "population_rule": "fixed_four_step_eligible",
-        "probability_basis": None,
         **behavior_document(tables),
     })
     _write_json(storage / "analyses" / "scored.json", {
@@ -561,10 +570,7 @@ def diagnose_stage(request: StageRequest) -> None:
         ],
     })
     if collection.get("subset_label"):
-        _write_json(storage / "analyses" / "subset.json", {
-            "subset_label": collection["subset_label"],
-            "stops_for_probability_basis": False,
-        })
+        _write_json(storage / "analyses" / "subset.json", {"subset_label": collection["subset_label"]})
 
 
 def build_view_stage(request: StageRequest) -> None:
@@ -1069,13 +1075,7 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "name": extraction.dataset_name,
             "split": extraction.dataset_split,
             "revision": extraction.dataset_revision,
-            **({"distractor_seed": extraction.distractor_seed} if extraction.distractor_seed is not None else {}),
-            # Absent for seeded_random so earlier MMLU collections keep their signature.
-            **(
-                {"distractor_selection": extraction.distractor_selection}
-                if extraction.distractor_selection in PREFERRED_SELECTIONS
-                else {}
-            ),
+            **non_default_fields(extraction, ("distractor_seed", "distractor_selection")),
         },
         "prompt": {
             "chat": extraction.chat,
@@ -1085,7 +1085,7 @@ def _extraction_request_signature(config: ExperimentConfig) -> str:
             "verbalizers": list(extraction.verbalizers),
             "selector": extraction.selector,
         },
-        "interventions": [_plain(vars(item)) for item in extraction.interventions],
+        "interventions": [_plain(non_default_fields(item)) for item in extraction.interventions],
         "prepared_identity": prepared_identity,
     })
 

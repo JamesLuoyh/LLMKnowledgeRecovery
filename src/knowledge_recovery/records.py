@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from types import MappingProxyType
 from typing import Any, ClassVar
-
-from knowledge_recovery.errors import PROBABILITY_BASES
 
 SCHEMA_VERSION = 1
 VIEW_ROLES = ("train", "validation", "evaluation")
 # These names are execution or analysis settings. They are recorded on their
 # own artifacts and are rejected if they appear inside an extraction identity.
+# ``cache_row_key`` accepts exactly these as reporting settings, so a renamed
+# analysis setting is added here once.
 EXTRACTION_EXCLUDED_KEYS = frozenset({
     "run_id",
     "eval_id",
@@ -24,9 +24,16 @@ EXTRACTION_EXCLUDED_KEYS = frozenset({
     "hostname",
     "ece_bins",
     "ece",
+    "calibration_bins",
     "probe_seed",
     "training_seed",
-    "probability_basis",
+    "filter_threshold",
+    "min_correct_prob",
+    "variant_stats",
+    "require_confident_on_every_variant",
+    "ood_variants",
+    "test_variants",
+    "loss",
     "timestamp",
     "processing_order",
 })
@@ -102,7 +109,6 @@ class Record:
 
     kind: ClassVar[str]
     schema: ClassVar[int] = SCHEMA_VERSION
-    omit_if_none: ClassVar[tuple[str, ...]] = ()
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -114,14 +120,58 @@ class Record:
         """Override to reject content that would name the wrong artifact."""
 
     def payload(self) -> dict[str, Any]:
-        """Kind, schema, and fields. Inapplicable optional fields are omitted."""
+        """Kind, schema, and fields. A field equal to its declared default is omitted.
+
+        A field added later with a default therefore leaves earlier digests
+        unchanged. A default must never change once released; change the
+        record's schema instead.
+        """
         body: dict[str, Any] = {"kind": self.kind, "schema": self.schema}
         for item in fields(self):
             value = getattr(self, item.name)
-            if value is None and item.name in self.omit_if_none:
+            if _is_default(item, value):
                 continue
             body[item.name] = value
         return body
+
+
+def non_default_fields(instance: Any, names: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Dataclass fields that differ from their declared defaults, by name.
+
+    ``names`` limits the result to those fields. Use this instead of ``vars``
+    when a configuration object enters a digest.
+    """
+    chosen = [item for item in fields(instance) if names is None or item.name in names]
+    if names is not None and len(chosen) != len(names):
+        raise ValueError(f"{type(instance).__name__} has no field among {', '.join(names)}")
+    return {
+        item.name: getattr(instance, item.name)
+        for item in chosen
+        if not _is_default(item, freeze(getattr(instance, item.name)))
+    }
+
+
+def _is_default(item: Any, value: Any) -> bool:
+    if item.default is not MISSING:
+        default = item.default
+    elif item.default_factory is not MISSING:
+        default = item.default_factory()
+    else:
+        return False
+    return same_value(value, freeze(default))
+
+
+def same_value(left: Any, right: Any) -> bool:
+    """Equality of frozen values that keeps the distinctions canonical JSON keeps."""
+    if type(left) is not type(right):
+        return False
+    if type(left) is float:
+        return repr(left) == repr(right)
+    if type(left) is tuple:
+        return len(left) == len(right) and all(same_value(a, b) for a, b in zip(left, right))
+    if type(left) is MappingProxyType:
+        return left.keys() == right.keys() and all(same_value(left[key], right[key]) for key in left)
+    return left == right
 
 
 def record(kind: str):
@@ -391,11 +441,6 @@ class ProbeTraining(Record):
 class EvaluationIdentity(Record):
     """Scoring identity of a saved method state. Output paths are not fields."""
 
-    omit_if_none = (
-        "transform_digest",
-        "selection_manifest_digest",
-        "uncertainty",
-    )
     method_state_digest: str
     evaluation_view_id: str
     prediction_convention: Any
@@ -546,28 +591,6 @@ class PromptRecord(Record):
             raise ValueError("resolved blocks, placement, and attention are required")
 
 
-@record("extraction_record")
-class ExtractionRecord(Record):
-    """Pointers to shard tensors. The vectors themselves stay in the cache."""
-
-    prompt_id: str
-    extraction_key: str
-    residual_reference: Any
-    logits_reference: Any
-    final_normalized_state: Any
-    numeric_metadata: Mapping[str, Any]
-    shard_references: tuple[Any, ...]
-
-    def validate(self) -> None:
-        _digest(self.prompt_id, "prompt_id")
-        _digest(self.extraction_key, "extraction_key")
-        _mapping(self.numeric_metadata, "numeric_metadata")
-        if type(self.shard_references) is not tuple or self.residual_reference is None:
-            raise ValueError("residual and shard references are required")
-        if self.logits_reference is None:
-            raise ValueError("logits reference is required")
-
-
 @record("answer_scores")
 class AnswerScores(Record):
     """Raw and canonical A/B scores plus the unrestricted greedy token."""
@@ -630,7 +653,6 @@ class FilterReport(Record):
     population_counts: Mapping[str, Any]
     split_denominators: Mapping[str, Any]
     canonical_only_diagnostics: Mapping[str, Any]
-    paths: Mapping[str, Any]
 
     def validate(self) -> None:
         for label in (
@@ -639,29 +661,8 @@ class FilterReport(Record):
             "population_counts",
             "split_denominators",
             "canonical_only_diagnostics",
-            "paths",
         ):
             _mapping(getattr(self, label), label)
-
-
-@record("decision_record")
-class DecisionRecord(Record):
-    """Explicit probability-basis choice. It is never inferred from a retention rate."""
-
-    probability_basis: str
-    filter_report_digest: str
-    scope: Any
-    timestamp: str
-    user_instruction: str
-
-    def validate(self) -> None:
-        if self.probability_basis not in PROBABILITY_BASES:
-            raise ValueError("probability_basis must be raw or canonical")
-        _digest(self.filter_report_digest, "filter_report_digest")
-        if self.scope is None:
-            raise ValueError("scope is required")
-        _text(self.timestamp, "timestamp")
-        _text(self.user_instruction, "user_instruction")
 
 
 @record("task_spec")
@@ -716,128 +717,3 @@ class MethodSpec(Record):
         _mapping(self.parameters, "parameters")
         if self.output_validation is None:
             raise ValueError("output_validation is required")
-
-
-@record("probe_spec")
-class ProbeSpec(Record):
-    """Architecture and preprocessing requested from cached representations."""
-
-    layers: tuple[Any, ...]
-    positions: tuple[Any, ...]
-    preprocessing: Any
-    output_interface: Any
-    architecture: Any
-    compatible_tasks: tuple[Any, ...]
-    compatible_losses: tuple[Any, ...]
-
-    def validate(self) -> None:
-        for label in ("layers", "positions", "compatible_tasks", "compatible_losses"):
-            if type(getattr(self, label)) is not tuple:
-                raise ValueError(f"{label} must be a sequence")
-        for label in ("preprocessing", "output_interface", "architecture"):
-            if getattr(self, label) is None:
-                raise ValueError(f"{label} is required")
-
-
-@record("run_manifest")
-class RunManifest(Record):
-    """Training specification plus output digests. The run id hashes only the specification."""
-
-    train_view_id: str
-    validation_view_id: str
-    extraction_references: tuple[Any, ...]
-    task: Any
-    architecture: Any
-    features: Any
-    preprocessing: Any
-    training_seed: int
-    loss: Any
-    optimizer: Any
-    stopping_rules: Any
-    selection_rules: Any
-    environment_versions: Mapping[str, Any]
-    checkpoint_digest: str | None
-    selection_digest: str | None
-
-    def validate(self) -> None:
-        _digest(self.train_view_id, "train_view_id")
-        _digest(self.validation_view_id, "validation_view_id")
-        if type(self.training_seed) is not int:
-            raise ValueError("training_seed must be an integer")
-        if type(self.extraction_references) is not tuple:
-            raise ValueError("extraction_references must be a sequence")
-        _mapping(self.environment_versions, "environment_versions")
-        reject_excluded_keys(
-            self.environment_versions,
-            frozenset({"hostname", "batch_size", "timestamp", "processing_order"}),
-            identity="run manifest",
-        )
-        for label in ("checkpoint_digest", "selection_digest"):
-            value = getattr(self, label)
-            if value is not None:
-                _digest(value, label)
-        for label in (
-            "task",
-            "architecture",
-            "features",
-            "preprocessing",
-            "loss",
-            "optimizer",
-            "stopping_rules",
-            "selection_rules",
-        ):
-            if getattr(self, label) is None:
-                raise ValueError(f"{label} is required")
-
-
-@record("evaluation_manifest")
-class EvaluationManifest(Record):
-    """Evaluation identity plus the paths of its outputs."""
-
-    task_id: str
-    method_id: str
-    method_state_digest: str
-    evaluation_view_id: str
-    metric_definitions: Any
-    aggregation_rules: Any
-    calibration_bins: Any
-    prediction_convention: Any
-    prediction_version: str
-    metrics_version: str
-    output_references: Any
-    checkpoint_digest: str | None = None
-    selection_digest: str | None = None
-    transform_digest: str | None = None
-    uncertainty: Any | None = None
-
-    def validate(self) -> None:
-        _text(self.task_id, "task_id")
-        _text(self.method_id, "method_id")
-        _digest(self.method_state_digest, "method_state_digest")
-        _digest(self.evaluation_view_id, "evaluation_view_id")
-        _text(self.prediction_version, "prediction_version")
-        _text(self.metrics_version, "metrics_version")
-        if self.output_references is None or self.calibration_bins is None:
-            raise ValueError("calibration bins and output references are required")
-        for label in ("checkpoint_digest", "selection_digest", "transform_digest"):
-            value = getattr(self, label)
-            if value is not None:
-                _digest(value, label)
-
-
-@record("execution_provenance")
-class ExecutionProvenance(Record):
-    """Host and batch facts stored beside a run, never inside an extraction key."""
-
-    timestamp: str
-    hostname: str
-    batch_size: int
-    processing_order: tuple[Any, ...]
-
-    def validate(self) -> None:
-        _text(self.timestamp, "timestamp")
-        _text(self.hostname, "hostname")
-        if type(self.batch_size) is not int or self.batch_size < 1:
-            raise ValueError("batch_size must be a positive integer")
-        if type(self.processing_order) is not tuple:
-            raise ValueError("processing_order must be a sequence")

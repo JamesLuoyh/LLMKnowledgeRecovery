@@ -58,7 +58,8 @@ def test_hooks_select_the_last_real_token_and_match_forward_logits():
     assert last_nonpadding_index(mask[0]) == 1
     assert numpy.allclose(captured.logits[0], direct[0, 1])
     assert not numpy.allclose(captured.logits[0], direct[0, 2])
-    assert not numpy.allclose(captured.residuals[0, 0], captured.embedding[0, 1])
+    assert captured.embedding.shape == (2, 4)
+    assert not numpy.allclose(captured.residuals[0, 0], captured.embedding[0])
     assert not numpy.array_equal(captured.final_normalized[0], captured.residuals[0, -1])
     for row in range(2):
         length = 2 if row == 0 else 3
@@ -121,7 +122,6 @@ def test_storage_dtypes_and_separate_final_norm(tmp_path):
     assert numpy.fromfile(logits_file, dtype="<f4").dtype == numpy.float32
     final = store.read_final_norm_row(references[0])
     residual = store.read_residual_row(references[0])
-    assert final is not None
     assert not numpy.array_equal(final, residual[-1])
     assert store.read_logits_row(references[0]).dtype == numpy.float32
 
@@ -260,3 +260,107 @@ def test_precision_has_no_silent_fallback():
         resolve_execution_precision("bf16", bf16_supported=False, fp16_supported=True)
     assert resolve_execution_precision("bf16", bf16_supported=True, fp16_supported=False) == "bf16"
     assert resolve_execution_precision("fp32", bf16_supported=False, fp16_supported=False) == "fp32"
+
+
+def test_missing_rows_are_computed_shortest_first(tmp_path):
+    store = ExtractionStore(tmp_path)
+    lengths = [5, 2, 9, 2, 4]
+    rows = [{"row_key": _key(f"row-{index}"), "input_ids": [1] * length} for index, length in enumerate(lengths)]
+    seen = []
+
+    def forward(_model, chunk, *, batch_size, precision):
+        seen.append([len(row["input_ids"]) for row in chunk])
+        return [_produced() for _ in chunk]
+
+    result = run_extraction(
+        rows,
+        store=store,
+        model_factory=lambda: MockQwen(n_layers=1, hidden=1, vocab=1, precision="bf16"),
+        forward_batch=forward,
+        initial_batch_size=2,
+        precision="bf16",
+    )
+    assert seen == [[2, 2], [4, 5], [9]]
+    # References still follow the caller's row order.
+    assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
+
+
+def test_a_device_out_of_memory_error_asks_for_a_smaller_batch(monkeypatch):
+    from knowledge_recovery.models import qwen
+
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    def exhausted(*_args, **_kwargs):
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    monkeypatch.setattr(qwen, "capture_selected", exhausted)
+    model = MockQwen(n_layers=1, hidden=2, vocab=3, precision="bf16")
+    row = {"input_ids": [1, 2], "attention_mask": [1, 1]}
+    with pytest.raises(BatchExceededMemory):
+        qwen.forward_padded(model, [row], batch_size=1, precision="bf16")
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("shape mismatch")
+
+    monkeypatch.setattr(qwen, "capture_selected", broken)
+    with pytest.raises(RuntimeError, match="shape mismatch"):
+        qwen.forward_padded(model, [row], batch_size=1, precision="bf16")
+
+
+def test_a_selected_forward_computes_logits_at_the_selected_token_only():
+    model = MockQwen(n_layers=2, hidden=4, vocab=6, precision="bf16")
+    freeze_model(model)
+    ids = [[4, 5, 0], [7, 8, 9]]
+    mask = [[1, 1, 0], [1, 1, 1]]
+    full = capture_selected(model, ids, mask)
+    seen = {}
+
+    def forward_selected(input_ids, attention_mask, positions):
+        seen["positions"] = list(positions)
+        logits = model.forward(input_ids, attention_mask)
+        model.lm_head.emit(logits[numpy.arange(2), positions])
+
+    model.forward_selected = forward_selected
+    selected = capture_selected(model, ids, mask)
+    assert seen["positions"] == [1, 2]
+    # The last lm_head call is the [batch, vocab] one and is taken as already selected.
+    assert numpy.array_equal(selected.logits, full.logits)
+    assert numpy.array_equal(selected.residuals, full.residuals)
+
+
+def test_library_versions_and_gpu_model_stay_out_of_the_row_key():
+    from knowledge_recovery.extraction.identity import build_row_key
+
+    runtime = {
+        "backend": "torch",
+        "torch_version": "2.4.0",
+        "transformers_version": "4.44.0",
+        "numpy_version": "1.26.4",
+        "device_type": "cuda",
+        "device_name": "NVIDIA A100",
+        "device_capability": [8, 0],
+        "attention_backend": "sdpa",
+        "execution_precision": "bf16",
+    }
+    common = {
+        "model_signature": _key("model"),
+        "input_ids": [1, 2, 3],
+        "attention_mask": [1, 1, 1],
+        "prompt_contract_digest": _key("contract"),
+        "selected_position": 2,
+        "execution_precision": "bf16",
+        "attention_backend": "sdpa",
+    }
+    key = build_row_key(**common, numeric_runtime_signature=runtime)
+    upgraded = {
+        **runtime,
+        "torch_version": "2.6.0",
+        "transformers_version": "4.50.0",
+        "numpy_version": "2.1.0",
+        "device_name": "NVIDIA H100",
+        "device_capability": [9, 0],
+    }
+    assert build_row_key(**common, numeric_runtime_signature=upgraded) == key
+    for field, value in (("backend", "integration_mock"), ("device_type", "cpu"), ("attention_backend", "eager")):
+        assert build_row_key(**common, numeric_runtime_signature={**runtime, field: value}) != key

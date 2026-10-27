@@ -145,7 +145,7 @@ def apply_filter_gate(
         raise ValueError("variant_id must be a non-empty string")
     pairs = _pairs(orders, threshold)
     directory = Path(output_directory)
-    report = _report(pairs, threshold=threshold, variant_id=variant_id, directory=directory)
+    report = _report(pairs, threshold=threshold, variant_id=variant_id)
     digest = _write(directory, report, _render(report))
     eligible = tuple(pair.base_group_id for pair in pairs if pair.passed)
     return FilterOutcome(
@@ -210,7 +210,6 @@ def apply_variant_gate(
         splits=splits,
         threshold=threshold,
         require_confident_on_every_variant=require_confident_on_every_variant,
-        directory=directory,
     )
     digest = _write(directory, report, _render_variants(report), stem="variant_filter_report")
     return VariantFilterOutcome(
@@ -412,7 +411,6 @@ def _report(
     *,
     threshold: float,
     variant_id: str,
-    directory: Path,
 ) -> FilterReport:
     return FilterReport(
         paired_eligibility={
@@ -432,11 +430,6 @@ def _report(
             "policy": "fixed_four_step",
             "steps": list(COUNT_STEPS[1:]),
             "option_probability": "normalized_ab",
-        },
-        paths={
-            "directory": str(directory),
-            "json": "filter_report.json",
-            "text": "filter_report.txt",
         },
     )
 
@@ -531,7 +524,6 @@ def _variant_report(
     splits: Mapping[str, str],
     threshold: float,
     require_confident_on_every_variant: bool,
-    directory: Path,
 ) -> FilterReport:
     population: dict[str, Any] = {
         variant_id: {
@@ -575,11 +567,6 @@ def _variant_report(
             "pool": "clean_filter_eligible",
             "steps": list(VARIANT_COUNT_STEPS[1:]),
             "option_probability": "normalized_ab",
-        },
-        paths={
-            "directory": str(directory),
-            "json": "variant_filter_report.json",
-            "text": "variant_filter_report.txt",
         },
     )
 
@@ -692,7 +679,9 @@ def _append_block(
 def _write(directory: Path, report: FilterReport, text: str, *, stem: str = "filter_report") -> str:
     directory.mkdir(parents=True, exist_ok=True)
     artifact = identify(report)
-    sidecar = json.dumps(artifact.sidecar(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    # Paths sit beside the record, not in it, so moving storage keeps the digest.
+    paths = {"directory": str(directory), "json": f"{stem}.json", "text": f"{stem}.txt"}
+    sidecar = json.dumps({**artifact.sidecar(), "paths": paths}, indent=2, sort_keys=True, allow_nan=False) + "\n"
     _atomic_text(directory / f"{stem}.json", sidecar)
     _atomic_text(directory / f"{stem}.txt", text)
     if content_digest(json.loads(artifact.canonical_json)) != artifact.digest:

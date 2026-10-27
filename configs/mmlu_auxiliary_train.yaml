@@ -54,7 +54,6 @@ extraction:
     save_final_normalized_state: true
     residual_storage_dtype: bf16
     logits_storage_dtype: float32
-    logits_scope: full_vocabulary
 
 analysis_view:
   schema_version: 1

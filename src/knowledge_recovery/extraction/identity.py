@@ -18,11 +18,17 @@ from knowledge_recovery.models.qwen import (
 )
 from knowledge_recovery.provenance import extraction_signature, prompt_signature
 
+# Each row keeps logit_A, logit_B, the vocabulary log-normalizer, and the greedy id.
+LOGITS_SCOPE = "ab_summary"
 SAVED_REPRESENTATIONS = (
     "post_block_residual",
     "final_normalized_state",
-    "full_vocabulary_logits",
+    "ab_logit_summary",
 )
+# Runtime facts that change the stored numbers. Library versions, the GPU model,
+# and its compute capability are recorded on the collection manifest instead,
+# so an upgrade or a different card reuses existing rows.
+ROW_KEY_RUNTIME_FIELDS = ("backend", "device_type", "attention_backend", "execution_precision")
 
 
 def build_row_key(
@@ -35,8 +41,8 @@ def build_row_key(
     selected_position: int,
     execution_precision: str,
     quantization: str = "none",
-    attention_backend: str = "eager",
-    numeric_runtime_signature: Mapping[str, Any] | None = None,
+    attention_backend: str,
+    numeric_runtime_signature: Mapping[str, Any],
     reporting: Mapping[str, Any] | None = None,
 ) -> str:
     """Hash one logical forward pass. ``reporting`` does not enter the key."""
@@ -61,7 +67,7 @@ def build_row_key(
         position_selector=position_selector,
         resolved_logical_positions=(selected_position,),
         saved_representation_kinds=SAVED_REPRESENTATIONS,
-        logits_scope="full_vocabulary",
+        logits_scope=LOGITS_SCOPE,
         execution_precision=execution_precision,
         quantization=quantization,
         attention_backend=attention_backend,
@@ -70,17 +76,7 @@ def build_row_key(
             "augmentation": False,
             "seeded_inference": False,
         },
-        numeric_runtime_signature=(
-            dict(numeric_runtime_signature)
-            if numeric_runtime_signature is not None
-            else {
-                "backend": "unspecified",
-                "attention_backend": attention_backend,
-                "execution_precision": execution_precision,
-                "residual_storage_dtype": "bf16",
-                "logits_storage_dtype": "float32",
-            }
-        ),
+        numeric_runtime_signature=row_key_runtime(numeric_runtime_signature),
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
         tensor_schema_version=TENSOR_SCHEMA_VERSION,
@@ -91,3 +87,10 @@ def build_row_key(
         extraction_signature=extraction.digest,
         reporting=reporting,
     )
+
+
+def row_key_runtime(signature: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of a resolved runtime signature that enters the row key."""
+    if not isinstance(signature, Mapping):
+        raise TypeError("numeric_runtime_signature must be a mapping")
+    return {key: signature[key] for key in ROW_KEY_RUNTIME_FIELDS if key in signature}

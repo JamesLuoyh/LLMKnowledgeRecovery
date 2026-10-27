@@ -51,7 +51,6 @@ def run_extraction(
     precision: str,
     probe_only: bool = False,
     probe_only_hook: Callable[[], None] | None = None,
-    execution_backend: str = "local",
 ) -> ExtractionResult:
     """Look up every row. Compute only keys that are absent from the index.
 
@@ -90,7 +89,12 @@ def run_extraction(
     model = model_factory()
     freeze_model(model)
     absent = set(missing)
-    pending = [row for row in rows if row["row_key"] in absent]
+    # Similar lengths share a batch, so little of each forward is padding. A batch
+    # that halves after an out-of-memory error then only meets longer prompts.
+    pending = sorted(
+        (row for row in rows if row["row_key"] in absent),
+        key=lambda row: len(row.get("input_ids", ())),
+    )
     batch_sizes = _compute_missing(
         pending,
         store=store,
@@ -98,7 +102,6 @@ def run_extraction(
         forward_batch=forward_batch,
         batch_size=initial_batch_size,
         precision=precision,
-        execution_backend=execution_backend,
     )
     return ExtractionResult(
         references=store.lookup(keys, model_factory=_refuse_model, extraction_command="kr extract --config cache"),
@@ -137,7 +140,6 @@ def _compute_missing(
     forward_batch: ForwardBatch,
     batch_size: int,
     precision: str,
-    execution_backend: str,
 ) -> tuple[int, ...]:
     sizes: list[int] = []
     size = batch_size
@@ -159,7 +161,7 @@ def _compute_missing(
                 raise RuntimeError("the forward pass did not return one row per prompt")
             store_rows = []
             for row, item in zip(chunk, produced, strict=True):
-                store_rows.append(_store_row(str(row["row_key"]), item, precision, size, execution_backend))
+                store_rows.append(_store_row(str(row["row_key"]), item))
             writer.write_rows(store_rows)
             sizes.append(size)
             start += len(chunk)
@@ -168,13 +170,7 @@ def _compute_missing(
     return tuple(sizes)
 
 
-def _store_row(
-    key: str,
-    produced: Mapping[str, Any],
-    precision: str,
-    batch_size: int,
-    execution_backend: str,
-) -> dict[str, Any]:
+def _store_row(key: str, produced: Mapping[str, Any]) -> dict[str, Any]:
     residuals = numpy.asarray(produced["residuals"], dtype=numpy.float32)
     logits = numpy.asarray(produced["logits"], dtype=numpy.float32)
     final = numpy.asarray(produced["final_normalized"], dtype=numpy.float32)
@@ -186,9 +182,6 @@ def _store_row(
         raise ValueError(
             "the final normalized state matched the final block residual and was not stored in its place"
         )
-    if produced.get("execution_precision", precision) != precision:
-        raise RuntimeError("an out-of-memory retry changed execution precision")
-    del batch_size, execution_backend
     return {
         "row_key": key,
         "residuals": residuals,

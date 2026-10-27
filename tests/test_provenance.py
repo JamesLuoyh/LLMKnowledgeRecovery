@@ -76,7 +76,7 @@ def _extraction(**overrides):
         "position_selector": "last_nonpadding_input_token",
         "resolved_logical_positions": [3],
         "saved_representation_kinds": ["post_block_pre_final_norm", "final_normalized"],
-        "logits_scope": "full_vocabulary",
+        "logits_scope": "ab_summary",
         "execution_precision": "bf16",
         "quantization": "none",
         "attention_backend": "sdpa",
