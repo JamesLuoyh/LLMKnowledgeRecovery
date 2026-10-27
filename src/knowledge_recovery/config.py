@@ -54,6 +54,8 @@ _MMLU_INCORRECT_PATHS = {
     "least_preferred": "choices[least_preferred_incorrect]",
 }
 _ADAPTERS = ("sycophancy", "mmlu")
+# ab_summary keeps the A/B logits, the vocabulary log-normalizer, and the greedy id.
+_LOGITS_SCOPES = ("full_vocabulary", "ab_summary")
 _DEFINITION_OPTIONAL = (
     "preset",
     "template",
@@ -460,7 +462,11 @@ def _extraction(raw: Any) -> ExtractionConfig:
     _expect(internals, "representation", "post_block_pre_final_norm", "extraction.internals")
     _expect(internals, "residual_storage_dtype", "bf16", "extraction.internals")
     _expect(internals, "logits_storage_dtype", "float32", "extraction.internals")
-    _expect(internals, "logits_scope", "full_vocabulary", "extraction.internals")
+    logits_scope = internals["logits_scope"]
+    if logits_scope not in _LOGITS_SCOPES:
+        raise ConfigurationError(
+            f"extraction.internals.logits_scope must be one of {', '.join(_LOGITS_SCOPES)}"
+        )
     if internals["save_final_normalized_state"] is not True:
         raise ConfigurationError(
             "extraction.internals.save_final_normalized_state must be true. "
@@ -523,7 +529,7 @@ def _extraction(raw: Any) -> ExtractionConfig:
         save_final_normalized_state=True,
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
-        logits_scope="full_vocabulary",
+        logits_scope=logits_scope,
         distractor_seed=distractor_seed,
         distractor_selection=distractor_selection,
     )

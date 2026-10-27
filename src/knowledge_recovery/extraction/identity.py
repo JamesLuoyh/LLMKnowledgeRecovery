@@ -23,6 +23,11 @@ SAVED_REPRESENTATIONS = (
     "final_normalized_state",
     "full_vocabulary_logits",
 )
+# logits_scope -> saved representation kinds.
+_REPRESENTATIONS_BY_SCOPE = {
+    "full_vocabulary": SAVED_REPRESENTATIONS,
+    "ab_summary": ("post_block_residual", "final_normalized_state", "ab_logit_summary"),
+}
 
 
 def build_row_key(
@@ -36,6 +41,7 @@ def build_row_key(
     execution_precision: str,
     quantization: str = "none",
     attention_backend: str = "eager",
+    logits_scope: str = "full_vocabulary",
     numeric_runtime_signature: Mapping[str, Any] | None = None,
     reporting: Mapping[str, Any] | None = None,
 ) -> str:
@@ -48,6 +54,8 @@ def build_row_key(
         raise ValueError(f"the initial selector is {SUPPORTED_POSITION_SELECTOR}")
     if type(selected_position) is not int or not 0 <= selected_position < len(ids):
         raise ValueError("selected_position must be an index of the logical sequence")
+    if logits_scope not in _REPRESENTATIONS_BY_SCOPE:
+        raise ValueError(f"logits_scope must be one of {', '.join(_REPRESENTATIONS_BY_SCOPE)}")
     prompt = prompt_signature(
         input_ids=ids,
         logical_attention_mask=mask,
@@ -60,8 +68,8 @@ def build_row_key(
         layer_hook_definitions=HOOK_DEFINITIONS,
         position_selector=position_selector,
         resolved_logical_positions=(selected_position,),
-        saved_representation_kinds=SAVED_REPRESENTATIONS,
-        logits_scope="full_vocabulary",
+        saved_representation_kinds=_REPRESENTATIONS_BY_SCOPE[logits_scope],
+        logits_scope=logits_scope,
         execution_precision=execution_precision,
         quantization=quantization,
         attention_backend=attention_backend,

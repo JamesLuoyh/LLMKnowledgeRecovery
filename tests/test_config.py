@@ -257,3 +257,13 @@ def test_empty_eval_variants_mean_no_ood_view(tmp_path):
 
 def test_the_working_config_still_loads():
     load_config(ROOT / "configs" / "initial_sycophancy.yaml")
+
+
+def test_logits_scope_is_full_vocabulary_or_ab_summary(tmp_path):
+    assert _shipped().extraction.logits_scope == "full_vocabulary"
+    document = _document()
+    document["extraction"]["internals"]["logits_scope"] = "ab_summary"
+    assert _load(document, tmp_path).extraction.logits_scope == "ab_summary"
+    document["extraction"]["internals"]["logits_scope"] = "top_k"
+    with pytest.raises(ConfigurationError, match="logits_scope must be one of full_vocabulary, ab_summary"):
+        _load(document, tmp_path)

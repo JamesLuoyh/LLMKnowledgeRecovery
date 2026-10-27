@@ -58,7 +58,8 @@ def test_hooks_select_the_last_real_token_and_match_forward_logits():
     assert last_nonpadding_index(mask[0]) == 1
     assert numpy.allclose(captured.logits[0], direct[0, 1])
     assert not numpy.allclose(captured.logits[0], direct[0, 2])
-    assert not numpy.allclose(captured.residuals[0, 0], captured.embedding[0, 1])
+    assert captured.embedding.shape == (2, 4)
+    assert not numpy.allclose(captured.residuals[0, 0], captured.embedding[0])
     assert not numpy.array_equal(captured.final_normalized[0], captured.residuals[0, -1])
     for row in range(2):
         length = 2 if row == 0 else 3
@@ -260,3 +261,88 @@ def test_precision_has_no_silent_fallback():
         resolve_execution_precision("bf16", bf16_supported=False, fp16_supported=True)
     assert resolve_execution_precision("bf16", bf16_supported=True, fp16_supported=False) == "bf16"
     assert resolve_execution_precision("fp32", bf16_supported=False, fp16_supported=False) == "fp32"
+
+
+def test_missing_rows_are_computed_shortest_first(tmp_path):
+    store = ExtractionStore(tmp_path)
+    lengths = [5, 2, 9, 2, 4]
+    rows = [{"row_key": _key(f"row-{index}"), "input_ids": [1] * length} for index, length in enumerate(lengths)]
+    seen = []
+
+    def forward(_model, chunk, *, batch_size, precision):
+        seen.append([len(row["input_ids"]) for row in chunk])
+        return [_produced() for _ in chunk]
+
+    result = run_extraction(
+        rows,
+        store=store,
+        model_factory=lambda: MockQwen(n_layers=1, hidden=1, vocab=1, precision="bf16"),
+        forward_batch=forward,
+        initial_batch_size=2,
+        precision="bf16",
+    )
+    assert seen == [[2, 2], [4, 5], [9]]
+    # References still follow the caller's row order.
+    assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
+
+
+def test_a_device_out_of_memory_error_asks_for_a_smaller_batch(monkeypatch):
+    from knowledge_recovery.models import qwen
+
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    def exhausted(*_args, **_kwargs):
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    monkeypatch.setattr(qwen, "capture_selected", exhausted)
+    model = MockQwen(n_layers=1, hidden=2, vocab=3, precision="bf16")
+    row = {"input_ids": [1, 2], "attention_mask": [1, 1]}
+    with pytest.raises(BatchExceededMemory):
+        qwen.forward_padded(model, [row], batch_size=1, precision="bf16")
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("shape mismatch")
+
+    monkeypatch.setattr(qwen, "capture_selected", broken)
+    with pytest.raises(RuntimeError, match="shape mismatch"):
+        qwen.forward_padded(model, [row], batch_size=1, precision="bf16")
+
+
+def test_a_selected_forward_computes_logits_at_the_selected_token_only():
+    model = MockQwen(n_layers=2, hidden=4, vocab=6, precision="bf16")
+    freeze_model(model)
+    ids = [[4, 5, 0], [7, 8, 9]]
+    mask = [[1, 1, 0], [1, 1, 1]]
+    full = capture_selected(model, ids, mask)
+    seen = {}
+
+    def forward_selected(input_ids, attention_mask, positions):
+        seen["positions"] = list(positions)
+        logits = model.forward(input_ids, attention_mask)
+        model.lm_head.emit(logits[numpy.arange(2), positions])
+
+    model.forward_selected = forward_selected
+    selected = capture_selected(model, ids, mask)
+    assert seen["positions"] == [1, 2]
+    # The last lm_head call is the [batch, vocab] one and is taken as already selected.
+    assert numpy.array_equal(selected.logits, full.logits)
+    assert numpy.array_equal(selected.residuals, full.residuals)
+
+
+def test_the_logits_scope_enters_the_row_key():
+    from knowledge_recovery.extraction.identity import build_row_key
+
+    common = {
+        "model_signature": _key("model"),
+        "input_ids": [1, 2, 3],
+        "attention_mask": [1, 1, 1],
+        "prompt_contract_digest": _key("contract"),
+        "selected_position": 2,
+        "execution_precision": "bf16",
+    }
+    full = build_row_key(**common)
+    assert build_row_key(**common, logits_scope="full_vocabulary") == full
+    assert build_row_key(**common, logits_scope="ab_summary") != full
+    with pytest.raises(ValueError, match="logits_scope must be one of"):
+        build_row_key(**common, logits_scope="top_k")

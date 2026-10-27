@@ -93,3 +93,45 @@ def test_token_ids_and_logits_are_rejected_when_they_break_the_contract():
         _score("0 1 2")
     with pytest.raises(TypeError, match="CanonicalTokens"):
         score_binary_answers([0.0, 1.0, 0.0], (1, 2))
+
+
+def test_the_ab_summary_scores_like_the_full_vocabulary():
+    import numpy
+
+    from knowledge_recovery.answers import AB_SUMMARY_FIELDS, score_binary_summary, summarize_binary_logits
+
+    generator = numpy.random.default_rng(0)
+    logits = generator.normal(scale=4.0, size=(6, 50)).astype(numpy.float32)
+    logits[1, 3] = logits[1].max() + 2  # greedy on A
+    logits[2, 7] = logits[2].max() + 2  # greedy on B
+    logits[3, [9, 4]] = logits[3].max() + 2  # tie away from A/B selects the smallest id
+    tokens = CanonicalTokens(A=3, B=7)
+    summaries = summarize_binary_logits(logits, tokens)
+    assert summaries.shape == (6, len(AB_SUMMARY_FIELDS))
+    assert summaries.dtype == numpy.float32
+    for row, summary in zip(logits, summaries, strict=True):
+        full = score_binary_answers([float(value) for value in row], tokens)
+        compact = score_binary_summary([float(value) for value in summary], tokens)
+        assert compact.canonical_ab_probabilities == full.canonical_ab_probabilities
+        assert compact.canonical_greedy_label == full.canonical_greedy_label
+        assert compact.unrestricted_greedy_token_id == full.unrestricted_greedy_token_id
+        assert compact.invalid_label == full.invalid_label
+        assert compact.raw_ab_probabilities == pytest.approx(full.raw_ab_probabilities, rel=1e-5, abs=1e-12)
+        assert compact.canonical_label_mass == pytest.approx(full.canonical_label_mass, rel=1e-5, abs=1e-12)
+    assert int(summaries[3, 3]) == 4
+
+
+def test_an_ab_summary_row_is_checked_before_it_is_scored():
+    import numpy
+
+    from knowledge_recovery.answers import score_binary_summary, summarize_binary_logits
+
+    tokens = CanonicalTokens(A=1, B=2)
+    with pytest.raises(ValueError, match="ab_summary row holds"):
+        score_binary_summary([0.0, 0.0, 0.0], tokens)
+    with pytest.raises(ValueError, match="not a token id"):
+        score_binary_summary([0.0, 0.0, 1.0, 2.5], tokens)
+    with pytest.raises(ValueError, match="outside the vocabulary"):
+        summarize_binary_logits(numpy.zeros((1, 2), dtype=numpy.float32), tokens)
+    with pytest.raises(ValueError, match="nonfinite"):
+        summarize_binary_logits(numpy.array([[0.0, numpy.inf, 0.0]], dtype=numpy.float32), tokens)
