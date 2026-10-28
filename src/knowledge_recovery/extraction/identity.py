@@ -22,7 +22,6 @@ from knowledge_recovery.provenance import extraction_signature, prompt_signature
 LOGITS_SCOPE = "ab_summary"
 SAVED_REPRESENTATIONS = (
     "post_block_residual",
-    "final_normalized_state",
     "ab_logit_summary",
 )
 # Runtime facts that change the stored numbers. Library versions, the GPU model,

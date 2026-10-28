@@ -71,6 +71,9 @@ class ExtractionStore:
         self.staging_root = self.root / "tmp" / "shards"
         self.index_path = self.extraction_root / INDEX_NAME
         self.lock_path = self.extraction_root / ".store.lock"
+        # Manifests that ``lookup`` or ``row_statuses`` verified. Row reads reuse them
+        # instead of checksumming a whole shard for every row they read.
+        self._verified: dict[str, dict[str, Any]] = {}
         self.shard_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
 
@@ -95,8 +98,6 @@ class ExtractionStore:
         directory.mkdir()
         spec = _write_tensors(directory, parsed)
         manifest = shard_manifest(row_keys=keys, checksums=_checksums(directory, spec["files"]), **spec["manifest"])
-        if spec["final_norm_shape"] is not None:
-            manifest["final_norm_shape"] = spec["final_norm_shape"]
         payload = _dumps(manifest).encode()
         (directory / "manifest.json").write_bytes(payload)
         _verify_files(directory, manifest)
@@ -193,7 +194,7 @@ class ExtractionStore:
             shard_id = index["rows"][key]["shard_id"]
             if shard_id not in verified:
                 try:
-                    _sealed_manifest(self.shard_root / shard_id)
+                    self._verified[shard_id] = _sealed_manifest(self.shard_root / shard_id)
                     verified[shard_id] = True
                 except CacheIncompatible:
                     verified[shard_id] = False
@@ -234,6 +235,7 @@ class ExtractionStore:
             directory = self.shard_root / entry["shard_id"]
             if entry["shard_id"] not in manifests:
                 manifests[entry["shard_id"]] = _sealed_manifest(directory)
+                self._verified[entry["shard_id"]] = manifests[entry["shard_id"]]
             manifest = manifests[entry["shard_id"]]
             offset = entry["row_offset"]
             if manifest["row_keys"][offset] != key:
@@ -255,10 +257,18 @@ class ExtractionStore:
             ))
         return tuple(references)
 
+    def _sealed(self, shard_id: str) -> dict[str, Any]:
+        """The manifest a lookup verified, or ``_sealed_manifest`` for a shard read without one."""
+        manifest = self._verified.get(shard_id)
+        if manifest is None:
+            manifest = _sealed_manifest(self.shard_root / shard_id)
+            self._verified[shard_id] = manifest
+        return manifest
+
     def read_residual_row(self, reference: RowReference) -> numpy.ndarray:
         """Memory-map stored residuals for one row. Logits are not opened."""
         directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
+        manifest = self._sealed(reference.shard_id)
         if manifest["layout"] == "equal_width":
             shape = tuple(manifest["residual_shape"])
             mapped = numpy.memmap(directory / "residual.bf16", dtype="<u2", mode="r", shape=shape)
@@ -279,18 +289,10 @@ class ExtractionStore:
     def read_logits_row(self, reference: RowReference) -> numpy.ndarray:
         """Memory-map one stored logit summary (``AB_SUMMARY_FIELDS`` order)."""
         directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
+        manifest = self._sealed(reference.shard_id)
         shape = tuple(manifest["logits_shape"])
         mapped = numpy.memmap(directory / "logits.f32", dtype="<f4", mode="r", shape=shape)
         return numpy.array(mapped[reference.row_offset], dtype=numpy.float32)
-
-    def read_final_norm_row(self, reference: RowReference) -> numpy.ndarray:
-        """Memory-map the separately stored final norm for one row."""
-        directory = self.shard_root / reference.shard_id
-        manifest = _sealed_manifest(directory)
-        shape = tuple(manifest["final_norm_shape"])
-        mapped = numpy.memmap(directory / "final_norm.bf16", dtype="<u2", mode="r", shape=shape)
-        return bf16_to_f32(numpy.array(mapped[reference.row_offset]))
 
 
 class BatchedIndexWriter:
@@ -362,16 +364,10 @@ def _rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         logits = numpy.asarray(row.get("logits"), dtype=numpy.float32)
         if logits.ndim != 1 or logits.shape[0] < 1:
             raise ValueError("logits must be a full-vocabulary vector")
-        if row.get("final_normalized") is None:
-            raise ValueError("every row stores its final normalized state")
-        final = numpy.asarray(row["final_normalized"], dtype=numpy.float32)
-        if final.ndim != 1:
-            raise ValueError("final normalized state is one vector per row")
         parsed.append({
             "row_key": key,
             "residuals": residuals,
             "logits": logits,
-            "final_normalized": final,
         })
     return parsed
 
@@ -416,21 +412,7 @@ def _write_tensors(directory: Path, rows: Sequence[Mapping[str, Any]]) -> dict[s
             "logits_shape": list(logits.shape),
             "files": files,
         }
-    final_shape = _write_final_norm(directory, rows, files)
-    return {"files": files, "manifest": manifest, "final_norm_shape": final_shape}
-
-
-def _write_final_norm(
-    directory: Path,
-    rows: Sequence[Mapping[str, Any]],
-    files: dict[str, dict[str, Any]],
-) -> list[int]:
-    """Store the final norm beside the block residuals. It is not a layer column."""
-    stacked = numpy.stack([numpy.asarray(row["final_normalized"], dtype=numpy.float32) for row in rows])
-    name = "final_norm.bf16"
-    numpy.ascontiguousarray(f32_to_bf16(stacked), dtype="<u2").tofile(directory / name)
-    files[name] = {"dtype": RESIDUAL_DTYPE, "shape": list(stacked.shape)}
-    return list(stacked.shape)
+    return {"files": files, "manifest": manifest}
 
 
 def _checksums(directory: Path, files: Mapping[str, Any]) -> dict[str, str]:

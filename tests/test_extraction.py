@@ -112,7 +112,7 @@ def test_a_block_tuple_contributes_its_first_element_only():
     assert captured.logits[0, 0] == 8
 
 
-def test_storage_dtypes_and_separate_final_norm(tmp_path):
+def test_storage_dtypes_without_the_final_norm(tmp_path):
     store = ExtractionStore(tmp_path)
     key = _key("stored")
     references = store.write_rows([{"row_key": key, **_produced()}])
@@ -120,9 +120,7 @@ def test_storage_dtypes_and_separate_final_norm(tmp_path):
     logits_file = tmp_path / "extractions" / "shards" / references[0].shard_id / "logits.f32"
     assert numpy.fromfile(residual_file, dtype="<u2").size > 0
     assert numpy.fromfile(logits_file, dtype="<f4").dtype == numpy.float32
-    final = store.read_final_norm_row(references[0])
-    residual = store.read_residual_row(references[0])
-    assert not numpy.array_equal(final, residual[-1])
+    assert not (residual_file.parent / "final_norm.bf16").exists()
     assert store.read_logits_row(references[0]).dtype == numpy.float32
 
 
@@ -282,6 +280,32 @@ def test_missing_rows_are_computed_shortest_first(tmp_path):
     )
     assert seen == [[2, 2], [4, 5], [9]]
     # References still follow the caller's row order.
+    assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
+
+
+def test_rows_sharing_a_key_are_computed_and_stored_once(tmp_path):
+    store = ExtractionStore(tmp_path)
+    shared = _key("same-prompt")
+    rows = [
+        {"row_key": shared, "input_ids": [1, 2]},
+        {"row_key": _key("other"), "input_ids": [1, 2, 3]},
+        {"row_key": shared, "input_ids": [1, 2]},
+    ]
+    seen = []
+
+    def forward(_model, chunk, *, batch_size, precision):
+        seen.extend(row["row_key"] for row in chunk)
+        return [_produced() for _ in chunk]
+
+    result = run_extraction(
+        rows,
+        store=store,
+        model_factory=lambda: MockQwen(n_layers=1, hidden=1, vocab=1, precision="bf16"),
+        forward_batch=forward,
+        initial_batch_size=4,
+        precision="bf16",
+    )
+    assert sorted(seen) == sorted([shared, _key("other")])
     assert [item.extraction_row_key for item in result.references] == [row["row_key"] for row in rows]
 
 

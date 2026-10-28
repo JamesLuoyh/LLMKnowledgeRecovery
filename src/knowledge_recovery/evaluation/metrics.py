@@ -130,21 +130,26 @@ def roc_auc(probabilities: Sequence[float], targets: Sequence[int]) -> float | N
         raise ValueError("probabilities and targets must have the same length")
     if not positive:
         return None
-    higher = 0.0
     positive_count = sum(label == 1 for label in observed)
     negative_count = len(observed) - positive_count
     if positive_count == 0 or negative_count == 0:
         return None
-    for score, label in zip(positive, observed, strict=True):
-        if label != 1:
-            continue
-        for other, other_label in zip(positive, observed, strict=True):
-            if other_label != 0:
-                continue
-            if score > other:
-                higher += 1.0
-            elif score == other:
-                higher += 0.5
+    # Walk the scores in ascending order, one group of tied scores at a time.
+    # Each positive beats every negative below its group and ties with the
+    # negatives inside it. The count is a half-integer, so it is exact.
+    ranked = sorted(zip(positive, observed, strict=True))
+    higher = 0.0
+    negatives_below = 0
+    start = 0
+    while start < len(ranked):
+        end = start
+        while end < len(ranked) and ranked[end][0] == ranked[start][0]:
+            end += 1
+        tied_positives = sum(label for _score, label in ranked[start:end])
+        tied_negatives = end - start - tied_positives
+        higher += tied_positives * negatives_below + 0.5 * tied_positives * tied_negatives
+        negatives_below += tied_negatives
+        start = end
     return higher / (positive_count * negative_count)
 
 

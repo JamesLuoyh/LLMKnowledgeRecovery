@@ -443,6 +443,7 @@ def _block(pairs: Sequence[_Pair], threshold: float) -> dict[str, Any]:
 
 
 def _series(pairs: Sequence[_Pair], threshold: float, count_set: str) -> dict[str, int]:
+    passed = _passed_ids(pairs)
     chosen = []
     for pair in pairs:
         if count_set == "correct_at_A":
@@ -457,18 +458,20 @@ def _series(pairs: Sequence[_Pair], threshold: float, count_set: str) -> dict[st
         "after_option_probability": sum(_last_step(order, threshold) >= 2 for order in chosen),
         "after_greedy_correct": sum(_last_step(order, threshold) >= 3 for order in chosen),
         "after_both_orders_correct": sum(
-            _last_step(order, threshold) >= 3 and _pair_passed(pairs, order.base_group_id)
+            _last_step(order, threshold) >= 3 and order.base_group_id in passed
             for order in chosen
         ),
     }
 
 
-def _pair_passed(pairs: Sequence[_Pair], base_group_id: str) -> bool:
-    return next(pair.passed for pair in pairs if pair.base_group_id == base_group_id)
+def _passed_ids(pairs: Sequence[_Pair]) -> set[str]:
+    """Base groups whose pair passed, for set lookups in place of a scan per order."""
+    return {pair.base_group_id for pair in pairs if pair.passed}
 
 
 def _failures(pairs: Sequence[_Pair], threshold: float) -> dict[str, Any]:
     """First failed step, counted on the same three sample sets."""
+    passed = _passed_ids(pairs)
     body = {}
     for count_set in COUNT_SETS:
         orders = []
@@ -484,7 +487,7 @@ def _failures(pairs: Sequence[_Pair], threshold: float) -> dict[str, Any]:
             reached = _last_step(order, threshold)
             if reached < 3:
                 failed[str(reached + 1)] += 1
-            elif not _pair_passed(pairs, order.base_group_id):
+            elif order.base_group_id not in passed:
                 failed["4"] += 1
         body[count_set] = failed
     return body

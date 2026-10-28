@@ -462,10 +462,10 @@ def _extraction(raw: Any) -> ExtractionConfig:
     _expect(internals, "representation", "post_block_pre_final_norm", "extraction.internals")
     _expect(internals, "residual_storage_dtype", "bf16", "extraction.internals")
     _expect(internals, "logits_storage_dtype", "float32", "extraction.internals")
-    if internals["save_final_normalized_state"] is not True:
+    if internals["save_final_normalized_state"] is not False:
         raise ConfigurationError(
-            "extraction.internals.save_final_normalized_state must be true. "
-            "The final normalized state is stored separately from the final block residual."
+            "extraction.internals.save_final_normalized_state must be false. "
+            "No stage reads the final normalized state, so it is not stored."
         )
     placeholder_source = _text(
         interventions["preset_placeholder_source"],
@@ -521,7 +521,7 @@ def _extraction(raw: Any) -> ExtractionConfig:
         selector=selector,
         layers="all_transformer_blocks",
         representation="post_block_pre_final_norm",
-        save_final_normalized_state=True,
+        save_final_normalized_state=False,
         residual_storage_dtype="bf16",
         logits_storage_dtype="float32",
         distractor_seed=distractor_seed,

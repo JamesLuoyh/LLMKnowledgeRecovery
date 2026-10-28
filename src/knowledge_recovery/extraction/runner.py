@@ -51,11 +51,14 @@ def run_extraction(
     precision: str,
     probe_only: bool = False,
     probe_only_hook: Callable[[], None] | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> ExtractionResult:
     """Look up every row. Compute only keys that are absent from the index.
 
     ``probe_only`` reports missing keys and does not construct a model or
     open a network connection. Incomplete shards are not treated as absent.
+    ``progress`` receives the row count of each stored batch in place of the
+    progress bar, for a worker that reports to a parent process.
     """
     if type(initial_batch_size) is not int or initial_batch_size < 1:
         raise ValueError("batch size must be a positive integer")
@@ -88,13 +91,10 @@ def run_extraction(
         )
     model = model_factory()
     freeze_model(model)
-    absent = set(missing)
+    # Rows with the same key share one stored result, so each key is computed once.
     # Similar lengths share a batch, so little of each forward is padding. A batch
     # that halves after an out-of-memory error then only meets longer prompts.
-    pending = sorted(
-        (row for row in rows if row["row_key"] in absent),
-        key=lambda row: len(row.get("input_ids", ())),
-    )
+    pending = sorted(unique_missing_rows(rows, missing), key=lambda row: len(row.get("input_ids", ())))
     batch_sizes = _compute_missing(
         pending,
         store=store,
@@ -102,6 +102,7 @@ def run_extraction(
         forward_batch=forward_batch,
         batch_size=initial_batch_size,
         precision=precision,
+        progress=progress,
     )
     return ExtractionResult(
         references=store.lookup(keys, model_factory=_refuse_model, extraction_command="kr extract --config cache"),
@@ -109,6 +110,21 @@ def run_extraction(
         batch_sizes=batch_sizes,
         precision=precision,
     )
+
+
+def unique_missing_rows(rows: Sequence[Mapping[str, Any]], missing: Sequence[str]) -> list[Mapping[str, Any]]:
+    """The first row for each missing key, in row order.
+
+    Two prompts with identical tokens share a row key, for example two MMLU
+    items that differ only in a choice neither binary prompt shows.
+    """
+    absent = set(missing)
+    unique: list[Mapping[str, Any]] = []
+    for row in rows:
+        if row["row_key"] in absent:
+            absent.discard(row["row_key"])
+            unique.append(row)
+    return unique
 
 
 @contextmanager
@@ -140,13 +156,14 @@ def _compute_missing(
     forward_batch: ForwardBatch,
     batch_size: int,
     precision: str,
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[int, ...]:
     sizes: list[int] = []
     size = batch_size
     start = 0
     with (
         store.batched_writer(flush_every=INDEX_FLUSH_SHARDS) as writer,
-        tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress,
+        tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True, disable=progress is not None) as bar,
     ):
         while start < len(pending):
             chunk = pending[start:start + size]
@@ -165,8 +182,10 @@ def _compute_missing(
             writer.write_rows(store_rows)
             sizes.append(size)
             start += len(chunk)
-            progress.update(len(chunk))
-            progress.set_postfix(batch=size)
+            if progress is not None:
+                progress(len(chunk))
+            bar.update(len(chunk))
+            bar.set_postfix(batch=size)
     return tuple(sizes)
 
 
@@ -178,15 +197,15 @@ def _store_row(key: str, produced: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("residuals are [layers, hidden], logits are [vocab], and the final norm is [hidden]")
     if residuals.shape[0] < 1 or final.shape != (residuals.shape[1],):
         raise ValueError("the final normalized state has the residual width and is not a layer")
+    # The final norm is only checked, not stored: no stage reads it.
     if numpy.array_equal(final, residuals[-1]):
         raise ValueError(
-            "the final normalized state matched the final block residual and was not stored in its place"
+            "the final normalized state matched the final block residual, so the residuals are post-norm"
         )
     return {
         "row_key": key,
         "residuals": residuals,
         "logits": logits,
-        "final_normalized": final,
     }
 
 

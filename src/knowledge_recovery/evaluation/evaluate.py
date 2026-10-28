@@ -45,7 +45,11 @@ _CONSISTENCY_BASELINE = "contextual_answer"
 
 @dataclass(frozen=True)
 class EvaluationRow:
-    """One cached evaluation row. Residuals are keyed by layer index."""
+    """One cached evaluation row. Residuals are keyed by layer index.
+
+    A layer's residual is any float sequence: a tuple, or a numpy row as
+    ``evaluate`` reads from the cache. Probes widen it to float64.
+    """
 
     row_id: str
     base_group_id: str
@@ -55,7 +59,7 @@ class EvaluationRow:
     position: str
     awareness_target: int
     consistency_target: int
-    residuals: Mapping[int, tuple[float, ...]]
+    residuals: Mapping[int, Sequence[float]]
     canonical_ab: tuple[float, float]
     instance_id: str = ""
     weight: float = 1.0
@@ -200,6 +204,8 @@ def _linear_predictions(rows: Sequence[EvaluationRow], probe: LinearProbe) -> li
     transformed = apply_standardizer(design, Standardizer(probe.preprocessing, probe.mean, probe.scale, ()))
     logits = numpy.asarray(transformed, dtype=numpy.float64) @ numpy.asarray(probe.weight) + probe.bias
     task_id = probe.task_id
+    # One digest per probe: it hashes every weight, so per row it dominated evaluation time.
+    state_digest = _linear_state_digest(probe)
     return [
         _prediction(
             row,
@@ -210,7 +216,7 @@ def _linear_predictions(rows: Sequence[EvaluationRow], probe: LinearProbe) -> li
             logit=float(logits[index]),
             selected_layer=probe.selected_layer,
             class_order=AWARENESS_CLASS_ORDER if task_id == AWARENESS_TASK_ID else CONSISTENCY_CLASS_ORDER,
-            method_state_digest=_linear_state_digest(probe),
+            method_state_digest=state_digest,
         )
         for index, row in enumerate(rows)
     ]

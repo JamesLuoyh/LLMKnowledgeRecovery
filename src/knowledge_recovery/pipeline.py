@@ -7,6 +7,7 @@ probe-only stage are reported and do not construct a model.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import string
@@ -46,7 +47,7 @@ from knowledge_recovery.evaluation.evaluate import EvaluationRow, evaluate_saved
 from knowledge_recovery.evaluation.metrics import DEFAULT_ECE_BINS
 from knowledge_recovery.extraction.identity import build_row_key
 from knowledge_recovery.extraction.positions import last_nonpadding_index, select_last_nonpadding
-from knowledge_recovery.extraction.runner import run_extraction
+from knowledge_recovery.extraction.runner import run_extraction, unique_missing_rows
 from knowledge_recovery.interventions.materialize import materialize_interventions, specs_from_config
 from knowledge_recovery.methods.awareness import RULE as TRAINING_FREQUENCY_RULE
 from knowledge_recovery.methods.awareness import TrainingFrequency, fit_training_frequency
@@ -71,7 +72,7 @@ from knowledge_recovery.prompts.token_audit import (
     write_token_audit,
 )
 from knowledge_recovery.provenance import canonical_json, content_digest, identify, model_signature, prompt_contract, run_id
-from knowledge_recovery.records import PromptRecord, non_default_fields
+from knowledge_recovery.records import non_default_fields
 from knowledge_recovery.reports.export import export_report
 from knowledge_recovery.tasks import awareness_task_spec, consistency_task_spec
 from knowledge_recovery.tasks.base import AWARENESS_TASK_ID, CONSISTENCY_TASK_ID
@@ -101,6 +102,10 @@ STAGE_ORDER = (
 )
 # First attempted extraction batch. An out-of-memory error halves it; it is not in the row key.
 EXTRACTION_BATCH_SIZE = 32
+# Row fields an extract worker's forward pass reads. The rendered text stays in the parent.
+EXTRACT_WORKER_FIELDS = (
+    "row_key", "input_ids", "attention_mask", "selected_position", "question", "order_id", "variant_id",
+)
 METHOD_BINDINGS = (
     ("behavioral_awareness", "linear_agreement", "linear"),
     ("behavioral_awareness", "training_frequency", "training_frequency"),
@@ -251,7 +256,8 @@ def rank_distractors_stage(request: StageRequest) -> None:
 
     Each question is asked with all of its choices in every cyclic order. Only
     the option-letter logits at the last input token are kept. The output is
-    read by ``prepare`` and is not part of the extraction cache.
+    read by ``prepare`` and is not part of the extraction cache. With more
+    than one visible GPU, each GPU ranks every n-th question in its own process.
     """
     config = _config(request)
     if config.extraction.dataset_adapter != "mmlu":
@@ -259,25 +265,11 @@ def rank_distractors_stage(request: StageRequest) -> None:
     validate_before_expensive_work(config)
     storage = _storage(config)
     activate_offline(storage / "assets" / "huggingface")
-    dataset = Path(config.extraction.dataset_path)
-    source_identity = _file_digest(dataset)
+    source_identity = _file_digest(Path(config.extraction.dataset_path))
     (storage / "normalized").mkdir(parents=True, exist_ok=True)
-    # The seed only fills a placeholder distractor; the ranking reads the choices.
-    candidates = recover_mmlu(
-        _read_rows(dataset),
-        source_identity=source_identity,
-        conflict_directory=storage / "normalized",
-        distractor_seed=0,
-    ).items
+    candidates = _rank_candidates(config, source_identity)
     tokenizer = _tokenizer(Path(config.extraction.model_path))
-
-    def encode(user_text: str) -> tuple[int, ...]:
-        return tokenizer.encode_prompt(PromptExample(
-            user_text=user_text,
-            chat=config.extraction.chat,
-            system_message=config.extraction.system_message,
-        ))
-
+    encode = _prompt_encoder(config, tokenizer)
     width = max(len(distinct_choices(item)) for item in candidates)
     probe = encode(candidates[0].question)
     letter_ids: dict[str, int] = {}
@@ -286,20 +278,22 @@ def rank_distractors_stage(request: StageRequest) -> None:
         if len(ids) != 1:
             raise KnowledgeRecoveryError(f"option letter {letter!r} is not a single token: {list(ids)}")
         letter_ids[letter] = int(ids[0])
-    model = load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
     ordered_ids = list(letter_ids.values())
+    devices = _visible_devices(config)
     from tqdm import tqdm
 
     total = sum(len(distinct_choices(item)) for item in candidates)
     with tqdm(total=total, desc="rank-distractors", unit="prompt", dynamic_ncols=True) as progress:
-        ranked = rank_items(
-            candidates,
-            instruction=config.extraction.instruction,
-            encode=encode,
-            letter_logits=lambda batch, count: _letter_logits(model, batch, ordered_ids[:count]),
-            batch_size=RANK_BATCH_SIZE,
-            progress=progress.update,
-        )
+        if len(devices) > 1:
+            jobs = [
+                (device, (request.config, shard, len(devices), ordered_ids))
+                for shard, device in enumerate(devices)
+            ]
+            ranked = {}
+            for part in _run_on_devices("rank-distractors", _rank_worker, jobs, progress.update):
+                ranked.update(part)
+        else:
+            ranked = _rank_shard(config, candidates, encode, ordered_ids, progress.update)
     _write_json(storage / DISTRACTOR_PREFERENCES, {
         **_ranking_identity(config, source_identity),
         "letter_token_ids": letter_ids,
@@ -321,8 +315,8 @@ def extract_stage(request: StageRequest) -> None:
     if not Path(config.extraction.model_path).exists() and collection_path.is_file():
         _reuse_collection(storage, collection_path, config)
         return
-    audit = _audit(config, recheck=False)
-    tokenized = _tokenize(config, audit)
+    rendered = _read_rendered(storage)
+    audit = _audit(config, recheck=False, rendered=rendered)
     assets = resolve_local_assets(config.extraction.model_path)
     signature = model_signature(
         weight_content_digest=assets.weight_content_digest,
@@ -333,46 +327,57 @@ def extract_stage(request: StageRequest) -> None:
     contract = _prompt_contract(config, audit).digest
     model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
     runtime = numeric_runtime_signature(model_config, precision=config.extraction.precision)
-    prepared = []
-    for row in tokenized:
-        row_key = build_row_key(
-            model_signature=signature,
-            input_ids=row["input_ids"],
-            attention_mask=row["attention_mask"],
-            prompt_contract_digest=contract,
-            position_selector=SUPPORTED_POSITION_SELECTOR,
-            selected_position=row["selected_position"],
-            execution_precision=config.extraction.precision,
-            attention_backend=str(runtime["attention_backend"]),
-            numeric_runtime_signature=runtime,
-            reporting=_reporting(config),
-        )
-        prepared.append({**row, "row_key": row_key})
+    prepared = _tokenize(config, audit, rendered, {
+        "model_signature": signature,
+        "prompt_contract_digest": contract,
+        "position_selector": SUPPORTED_POSITION_SELECTOR,
+        "execution_precision": config.extraction.precision,
+        "attention_backend": str(runtime["attention_backend"]),
+        "numeric_runtime_signature": runtime,
+        "reporting": _reporting(config),
+    })
+    del rendered
     store = ExtractionStore(storage)
     statuses = store.row_statuses([row["row_key"] for row in prepared])
     missing = [row["row_key"] for row in prepared if statuses[row["row_key"]] != "indexed"]
 
-    def factory() -> object:
-        return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+    canonical_ids = (int(audit.token_ids["A"]), int(audit.token_ids["B"]))
+    devices = _visible_devices(config) if missing else []
+    if len(devices) > 1:
+        # Every GPU stores a disjoint share of the missing rows; the lookup below reads them all.
+        pending = [
+            {field: row[field] for field in EXTRACT_WORKER_FIELDS}
+            for row in unique_missing_rows(prepared, missing)
+        ]
+        from tqdm import tqdm
 
-    canonical = CanonicalTokens(A=int(audit.token_ids["A"]), B=int(audit.token_ids["B"]))
-
-    def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
-        if model_config.get("logit_rule") == "integration_subset_v1":
-            from knowledge_recovery.integration import subset_forward
-
-            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
-        else:
-            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
-        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
-        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
-
-    if missing:
+        jobs = [
+            (device, (request.config, pending[shard::len(devices)], canonical_ids))
+            for shard, device in enumerate(devices)
+        ]
+        with tqdm(total=len(pending), desc="extract", unit="row", dynamic_ncols=True) as progress:
+            sizes = _run_on_devices("extract", _extract_worker, jobs, progress.update)
+        del pending
+        probed = run_extraction(
+            prepared,
+            store=store,
+            model_factory=None,
+            forward_batch=None,
+            initial_batch_size=EXTRACTION_BATCH_SIZE,
+            precision=config.extraction.precision,
+            probe_only=True,
+        )
+        result = dataclasses.replace(
+            probed,
+            constructed_model=True,
+            batch_sizes=tuple(size for part in sizes for size in part),
+        )
+    elif missing:
         result = run_extraction(
             prepared,
             store=store,
-            model_factory=factory,
-            forward_batch=forward,
+            model_factory=_model_factory(config),
+            forward_batch=_extract_forward(model_config, canonical_ids),
             initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
         )
@@ -380,8 +385,8 @@ def extract_stage(request: StageRequest) -> None:
         result = run_extraction(
             prepared,
             store=store,
-            model_factory=factory,
-            forward_batch=forward,
+            model_factory=_model_factory(config),
+            forward_batch=_extract_forward(model_config, canonical_ids),
             initial_batch_size=EXTRACTION_BATCH_SIZE,
             precision=config.extraction.precision,
             probe_only=True,
@@ -422,6 +427,52 @@ def extract_stage(request: StageRequest) -> None:
             for row in prepared
         ],
     })
+
+
+def _model_factory(config: ExperimentConfig) -> Callable[[], object]:
+    def factory() -> object:
+        return load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+
+    return factory
+
+
+def _extract_forward(model_config: Mapping[str, Any], canonical_ids: tuple[int, int]) -> Callable[..., Any]:
+    """Forward a batch and keep the A/B logit summary in place of the full logits."""
+    canonical = CanonicalTokens(A=canonical_ids[0], B=canonical_ids[1])
+
+    def forward(model: object, rows: Sequence[Mapping[str, Any]], *, batch_size: int, precision: str):
+        if model_config.get("logit_rule") == "integration_subset_v1":
+            from knowledge_recovery.integration import subset_forward
+
+            produced = subset_forward(model, rows, batch_size=batch_size, precision=precision)
+        else:
+            produced = forward_padded(model, rows, batch_size=batch_size, precision=precision)
+        summaries = summarize_binary_logits(numpy.stack([item["logits"] for item in produced]), canonical)
+        return tuple({**item, "logits": summary} for item, summary in zip(produced, summaries, strict=True))
+
+    return forward
+
+
+def _extract_worker(
+    config_path: str,
+    rows: list[dict[str, Any]],
+    canonical_ids: tuple[int, int],
+    *,
+    progress: Callable[[int], None],
+) -> tuple[int, ...]:
+    """Store one GPU's share of the missing rows. Returns the batch sizes used."""
+    config = load_config(config_path)
+    model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
+    result = run_extraction(
+        rows,
+        store=ExtractionStore(_storage(config)),
+        model_factory=_model_factory(config),
+        forward_batch=_extract_forward(model_config, canonical_ids),
+        initial_batch_size=EXTRACTION_BATCH_SIZE,
+        precision=config.extraction.precision,
+        progress=progress,
+    )
+    return result.batch_sizes
 
 
 def diagnose_stage(request: StageRequest) -> None:
@@ -758,6 +809,7 @@ def _train_method(config, storage, views, task_id: str, method_id: str, config_n
         layers=tuple(range(1, train_residuals.shape[1] + 1)), task_id=task_id,
         training_seed=config.probe_run.training_seed, train_domains=("id",) * len(targets),
         validation_domains=("id",) * len(valid_rows),
+        processes=LINEAR_FIT_PROCESSES,
     )
     selection = select_probe(fits)
     write_selection_manifest(bundle / task_id / method_id, selection)
@@ -829,7 +881,8 @@ def _evaluation_rows(storage: Path, views: Mapping[str, Mapping[str, Any]]) -> t
                                   extraction_command="kr extract --config <path>") if awareness_rows else ()
         for row, reference in zip(awareness_rows, references, strict=True):
             residual = store.read_residual_row(reference)
-            residuals = {index + 1: tuple(float(value) for value in residual[index]) for index in range(residual.shape[0])}
+            # Row views of one float32 array per row. Python floats would need ~400 GB for MMLU.
+            residuals = dict(enumerate(residual, start=1))
             row_id = content_digest({"kind": "evaluation_row", "schema": 1, "row_key": row["row_key"],
                                      "base_group_id": row["base_group_id"], "variant_id": row["variant_id"],
                                      "instance_id": row["instance_id"], "order_id": row["order_id"]})
@@ -907,8 +960,13 @@ def _residuals(store: ExtractionStore, rows: Sequence[Mapping[str, Any]]) -> num
         references = store.lookup(keys, model_factory=_refuse_model, extraction_command="kr extract --config cache")
     except CacheIncomplete:
         raise
-    stacked = [store.read_residual_row(reference) for reference in references]
-    return numpy.stack(stacked).astype(numpy.float32)
+    # Callers reject empty views. Fill one float32 array instead of stacking a list of rows, which needs twice the memory.
+    first = store.read_residual_row(references[0])
+    stacked = numpy.empty((len(references), *first.shape), dtype=numpy.float32)
+    stacked[0] = first
+    for position, reference in enumerate(references[1:], start=1):
+        stacked[position] = store.read_residual_row(reference)
+    return stacked
 
 
 def _behavior_instance_labels(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str, str], str]:
@@ -925,10 +983,11 @@ def _behavior_instance_labels(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[s
     return labels
 
 
-def _audit(config: ExperimentConfig, *, recheck: bool):
+def _audit(config: ExperimentConfig, *, recheck: bool, rendered: Sequence[Mapping[str, Any]] | None = None):
     storage = _storage(config)
     activate_offline(storage / "assets" / "huggingface")
-    rendered = json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
+    if rendered is None:
+        rendered = _read_rendered(storage)
     tokenizer = _tokenizer(Path(config.extraction.model_path))
     assets = resolve_local_assets(config.extraction.model_path)
     examples = []
@@ -963,52 +1022,93 @@ def _audit(config: ExperimentConfig, *, recheck: bool):
         config_path=_config_token(config.path),
     )
     write_token_audit(storage / "audits", audit)
-    _tokenize(config, audit)
     return audit
 
 
-def _tokenize(config: ExperimentConfig, audit) -> list[dict[str, Any]]:
-    storage = _storage(config)
-    rendered = json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
-    tokenizer = _tokenizer(Path(config.extraction.model_path))
+def _read_rendered(storage: Path) -> list[dict[str, Any]]:
+    return json.loads((storage / "prompts" / "rendered.json").read_text(encoding="utf-8"))
+
+
+# Below this many prompts, tokenizing in the parent is faster than starting a pool.
+PARALLEL_TOKENIZE_MIN_ROWS = 20_000
+TOKENIZE_CHUNK_ROWS = 2_000
+TOKENIZE_MAX_PROCESSES = 32
+
+
+def _tokenize(
+    config: ExperimentConfig,
+    audit,
+    rendered: Sequence[Mapping[str, Any]],
+    key_settings: Mapping[str, Any],
+    *,
+    min_parallel_rows: int = PARALLEL_TOKENIZE_MIN_ROWS,
+) -> list[dict[str, Any]]:
+    """Token ids and the extraction row key per rendered prompt, kept in memory.
+
+    ``key_settings`` holds the ``build_row_key`` arguments shared by every row.
+    Large inputs are tokenized and keyed in a CPU process pool; the result is
+    the same row for row.
+    """
+    texts = [row["user_text"] for row in rendered]
+    setup = (config.extraction.model_path, config.extraction.chat, config.extraction.system_message, dict(key_settings))
+    chunks = [texts[start:start + TOKENIZE_CHUNK_ROWS] for start in range(0, len(texts), TOKENIZE_CHUNK_ROWS)]
+    processes = min(len(os.sched_getaffinity(0)), TOKENIZE_MAX_PROCESSES, len(chunks))
+    from contextlib import nullcontext
+
+    from tqdm import tqdm
+
+    if len(texts) < min_parallel_rows or processes < 2:
+        _start_row_encoder(*setup)
+        pool = nullcontext(None)
+    else:
+        import multiprocessing
+
+        pool = multiprocessing.get_context("spawn").Pool(processes, initializer=_start_row_encoder, initargs=setup)
+    encoded: list[tuple[list[int], str]] = []
+    with pool as workers, tqdm(total=len(texts), desc="tokenize", unit="row", dynamic_ncols=True) as progress:
+        parts = map(_encode_rows, chunks) if workers is None else workers.imap(_encode_rows, chunks)
+        for part in parts:
+            encoded.extend(part)
+            progress.update(len(part))
     tokenized = []
-    for row in rendered:
-        example = PromptExample(
-            user_text=row["user_text"],
-            chat=config.extraction.chat,
-            system_message=config.extraction.system_message,
-        )
-        input_ids = list(tokenizer.encode_prompt(example))
+    for row, (input_ids, row_key) in zip(rendered, encoded, strict=True):
         mask = [1] * len(input_ids)
-        position = last_nonpadding_index(mask)
-        blocks = dict(row["blocks"])
-        blocks["model_input_text"] = tokenizer.prompt_string(example)
-        record = PromptRecord(
-            base_item_id=row["base_group_id"],
-            order_id=row["order_id"],
-            variant_id=row["variant_id"],
-            intervention_instance_id=row["instance_id"],
-            correct_label=row["correct_label"],
-            ordered_answer_texts=tuple(row["ordered_answer_texts"]),
-            resolved_blocks=blocks,
-            placement=blocks["placement"],
-            rendered_text=row["user_text"],
-            input_token_ids=tuple(input_ids),
-            attention={"mask": mask, "padding": "right"},
-            token_audit_id=audit.audit_id,
-            prompt_hash=content_digest({"kind": "rendered_user_text", "schema": 1, "text": row["user_text"]}),
-            selected_input_position=position,
-        )
         tokenized.append({
             **row,
-            "prompt": _plain(record.payload()),
             "input_ids": input_ids,
             "attention_mask": mask,
-            "selected_position": position,
+            "selected_position": last_nonpadding_index(mask),
             "token_audit_id": audit.audit_id,
+            "row_key": row_key,
         })
-    _write_json(storage / "prompts" / "tokenized.json", tokenized)
     return tokenized
+
+
+# Per-process tokenizer and shared key arguments for ``_encode_rows``.
+_ROW_ENCODER: tuple[Any, bool, str | None, dict[str, Any]] | None = None
+
+
+def _start_row_encoder(model_path: str, chat: bool, system_message: str | None, key_settings: dict[str, Any]) -> None:
+    global _ROW_ENCODER
+    _ROW_ENCODER = (_tokenizer(Path(model_path)), chat, system_message, key_settings)
+
+
+def _encode_rows(texts: Sequence[str]) -> list[tuple[list[int], str]]:
+    """Token ids and row key for each user text, in order."""
+    assert _ROW_ENCODER is not None, "_start_row_encoder runs first"
+    tokenizer, chat, system_message, key_settings = _ROW_ENCODER
+    encoded = []
+    for text in texts:
+        input_ids = list(tokenizer.encode_prompt(PromptExample(user_text=text, chat=chat, system_message=system_message)))
+        mask = [1] * len(input_ids)
+        row_key = build_row_key(
+            input_ids=input_ids,
+            attention_mask=mask,
+            selected_position=last_nonpadding_index(mask),
+            **key_settings,
+        )
+        encoded.append((input_ids, row_key))
+    return encoded
 
 
 def _reuse_collection(storage: Path, collection_path: Path, config: ExperimentConfig) -> None:
@@ -1153,6 +1253,9 @@ def _config(request: StageRequest) -> ExperimentConfig:
 
 DISTRACTOR_PREFERENCES = Path("normalized") / "distractor_preferences.json"
 RANK_BATCH_SIZE = 16
+# Layers fit at once in single-threaded processes. Each holds about 40 GB for the
+# 377k-row MMLU training view (its float32 slice plus float64 and standardized copies).
+LINEAR_FIT_PROCESSES = 8
 
 
 def _ranking_identity(config: ExperimentConfig, source_identity: str) -> dict[str, Any]:
@@ -1188,6 +1291,134 @@ def _distractor_preferences(config: ExperimentConfig, source_identity: str) -> M
             f"Run: {command}"
         )
     return saved["items"]
+
+
+def _rank_candidates(config: ExperimentConfig, source_identity: str) -> tuple[Any, ...]:
+    # The seed only fills a placeholder distractor; the ranking reads the choices.
+    return recover_mmlu(
+        _read_rows(Path(config.extraction.dataset_path)),
+        source_identity=source_identity,
+        conflict_directory=_storage(config) / "normalized",
+        distractor_seed=0,
+    ).items
+
+
+def _prompt_encoder(config: ExperimentConfig, tokenizer: Any) -> Callable[[str], tuple[int, ...]]:
+    def encode(user_text: str) -> tuple[int, ...]:
+        return tokenizer.encode_prompt(PromptExample(
+            user_text=user_text,
+            chat=config.extraction.chat,
+            system_message=config.extraction.system_message,
+        ))
+
+    return encode
+
+
+def _rank_shard(
+    config: ExperimentConfig,
+    candidates: Sequence[Any],
+    encode: Callable[[str], tuple[int, ...]],
+    ordered_ids: Sequence[int],
+    progress: Callable[[int], None],
+) -> dict[str, dict[str, Any]]:
+    model = load_frozen_model(config.extraction.model_path, precision=config.extraction.precision)
+    return rank_items(
+        candidates,
+        instruction=config.extraction.instruction,
+        encode=encode,
+        letter_logits=lambda batch, count: _letter_logits(model, batch, ordered_ids[:count]),
+        batch_size=RANK_BATCH_SIZE,
+        progress=progress,
+    )
+
+
+def _visible_devices(config: ExperimentConfig) -> list[str]:
+    """GPU ids visible to this process, as ``CUDA_VISIBLE_DEVICES`` names them.
+
+    The integration mock runs on the CPU in one process.
+    """
+    model_config = json.loads(Path(config.extraction.model_path, "config.json").read_text(encoding="utf-8"))
+    if model_config.get("model_type") == "integration_mock":
+        return []
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        return [device.strip() for device in visible.split(",") if device.strip()]
+    import torch
+
+    return [str(index) for index in range(torch.cuda.device_count())]
+
+
+def _run_on_devices(
+    stage: str,
+    target: Callable[..., Any],
+    jobs: Sequence[tuple[str, tuple[Any, ...]]],
+    progress: Callable[[int], None],
+) -> list[Any]:
+    """Spawn one worker per ``(device, args)`` job; return results in job order.
+
+    Each worker calls ``target(*args, progress=...)`` with only its GPU visible.
+    The first failure stops every worker.
+    """
+    import multiprocessing
+    import queue
+
+    context = multiprocessing.get_context("spawn")
+    messages = context.Queue()
+    workers = [
+        context.Process(target=_device_worker, args=(target, device, shard, args, messages), daemon=True)
+        for shard, (device, args) in enumerate(jobs)
+    ]
+    for worker in workers:
+        worker.start()
+    results: dict[int, Any] = {}
+    try:
+        while len(results) < len(workers):
+            try:
+                kind, shard, payload = messages.get(timeout=60)
+            except queue.Empty:
+                dead = [worker.exitcode for worker in workers if worker.exitcode not in (None, 0)]
+                if dead:
+                    raise KnowledgeRecoveryError(f"a {stage} worker exited with code {dead[0]}")
+                continue
+            if kind == "progress":
+                progress(payload)
+            elif kind == "done":
+                results[shard] = payload
+            else:
+                raise KnowledgeRecoveryError(f"a {stage} worker failed on GPU {jobs[shard][0]}:\n{payload}")
+    finally:
+        for worker in workers:
+            if worker.is_alive() and len(results) < len(workers):
+                worker.terminate()
+            worker.join()
+    return [results[shard] for shard in range(len(workers))]
+
+
+def _device_worker(target: Callable[..., Any], device: str, shard: int, args: tuple[Any, ...], messages: Any) -> None:
+    # Set before the first CUDA call so "cuda" names this GPU only.
+    os.environ["CUDA_VISIBLE_DEVICES"] = device
+    try:
+        result = target(*args, progress=lambda count: messages.put(("progress", shard, count)))
+        messages.put(("done", shard, result))
+    except BaseException:
+        import traceback
+
+        messages.put(("failed", shard, traceback.format_exc()))
+
+
+def _rank_worker(
+    config_path: str,
+    shard: int,
+    shards: int,
+    ordered_ids: list[int],
+    *,
+    progress: Callable[[int], None],
+) -> dict[str, dict[str, Any]]:
+    config = load_config(config_path)
+    source_identity = _file_digest(Path(config.extraction.dataset_path))
+    candidates = _rank_candidates(config, source_identity)[shard::shards]
+    encode = _prompt_encoder(config, _tokenizer(Path(config.extraction.model_path)))
+    return _rank_shard(config, candidates, encode, ordered_ids, progress)
 
 
 def _letter_logits(model: Any, batch: Sequence[Sequence[int]], token_ids: Sequence[int]) -> numpy.ndarray:

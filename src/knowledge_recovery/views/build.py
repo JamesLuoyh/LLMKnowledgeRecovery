@@ -135,10 +135,11 @@ def _select(
     variants: Sequence[str],
 ) -> tuple[ScoredRow, ...]:
     allowed = set(variants)
+    retained = set(eligible)
     kept = [
         row
         for row in rows
-        if row.split == split and row.variant_id in allowed and row.base_group_id in set(eligible)
+        if row.split == split and row.variant_id in allowed and row.base_group_id in retained
     ]
     return tuple(sorted(kept, key=lambda row: (row.base_group_id, row.variant_id, row.order_id, row.row_key)))
 

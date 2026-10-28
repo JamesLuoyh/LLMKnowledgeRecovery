@@ -115,8 +115,14 @@ def fit_linear_probe(
     profile: LinearV1 | None = None,
     train_domains: Sequence[str] | None = None,
     validation_domains: Sequence[str] | None = None,
+    processes: int = 1,
 ) -> tuple[LayerFit, ...]:
-    """Fit each requested layer from its own seed. Input order does not change a layer."""
+    """Fit each requested layer from its own seed. Input order does not change a layer.
+
+    With ``processes`` above 1, layers are fit in that many spawned processes
+    whose BLAS runs on one thread. Mini-batches are small, so one thread per
+    layer is much faster than one multithreaded fit at a time.
+    """
     resolved = LINEAR_V1 if profile is None else profile
     _check_profile(resolved)
     if task_id not in _TASKS or method_id != LINEAR_METHOD_ID:
@@ -132,24 +138,62 @@ def fit_linear_probe(
     chosen = _layers(layers, int(train.shape[1]))
     if validation.shape[1:] != train.shape[1:]:
         raise ValueError("validation residuals must have the training width and layer count")
-    fits = [
-        _fit_layer(
-            train[:, layer - 1, :],
-            train_y,
-            validation[:, layer - 1, :],
-            valid_y,
-            layer=layer,
-            task_id=task_id,
-            method_id=method_id,
-            training_seed=training_seed,
-            preprocessing=preprocessing,
-            profile=resolved,
-            train_domains=train_domains,
-            validation_domains=validation_domains,
-        )
+    if type(processes) is not int or processes < 1:
+        raise ValueError("processes must be a positive integer")
+    options = {
+        "task_id": task_id,
+        "method_id": method_id,
+        "training_seed": training_seed,
+        "preprocessing": preprocessing,
+        "profile": resolved,
+        "train_domains": train_domains,
+        "validation_domains": validation_domains,
+    }
+    # Each job holds one layer; it becomes float64 only inside its own fit.
+    jobs = [
+        (train[:, layer - 1, :], train_y, validation[:, layer - 1, :], valid_y, layer, options)
         for layer in chosen
     ]
+    if processes == 1 or len(jobs) == 1:
+        fits = [_fit_layer_job(job) for job in jobs]
+    else:
+        fits = _fit_in_processes(jobs, min(processes, len(jobs)))
     return tuple(sorted(fits, key=lambda item: item.layer))
+
+
+# BLAS thread settings a fitting process starts with. They are read when numpy loads.
+_SINGLE_THREAD_ENVIRONMENT = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def _fit_in_processes(jobs: list[tuple], processes: int) -> list[LayerFit]:
+    import multiprocessing
+    import os
+
+    saved = {name: os.environ.get(name) for name in _SINGLE_THREAD_ENVIRONMENT}
+    os.environ.update(dict.fromkeys(_SINGLE_THREAD_ENVIRONMENT, "1"))
+    try:
+        # Spawned children copy the environment at start, before they import numpy.
+        pool = multiprocessing.get_context("spawn").Pool(processes)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    with pool:
+        return pool.map(_fit_layer_job, jobs, chunksize=1)
+
+
+def _fit_layer_job(job: tuple) -> LayerFit:
+    train, train_y, validation, valid_y, layer, options = job
+    return _fit_layer(
+        numpy.asarray(train, dtype=numpy.float64),
+        train_y,
+        numpy.asarray(validation, dtype=numpy.float64),
+        valid_y,
+        layer=layer,
+        **options,
+    )
 
 
 def _fit_layer(
@@ -242,7 +286,10 @@ def _check_profile(profile: LinearV1) -> None:
 
 
 def _cube(values: numpy.ndarray, label: str) -> numpy.ndarray:
-    array = numpy.asarray(values, dtype=numpy.float64)
+    """Check the shape. Float arrays keep their dtype; each layer is widened to float64 when fit."""
+    array = numpy.asarray(values)
+    if array.dtype.kind != "f":
+        array = array.astype(numpy.float64)
     if array.ndim != 3 or array.shape[0] == 0 or array.shape[1] == 0 or array.shape[2] == 0:
         raise ValueError(f"{label} must have shape [rows, layers, width]")
     return array
